@@ -114,7 +114,12 @@ jobs:
       - name: Install JS dependencies
         if: needs.detect-and-generate.outputs.language == 'javascript'
         # Works with or without package-lock.json — universal project support
-        run: npm ci 2>/dev/null || npm install
+        run: |
+          if [ -f package.json ]; then
+            npm ci 2>/dev/null || npm install
+          else
+            echo "No package.json, skipping npm install"
+          fi
 
       - name: Install Python dependencies
         if: needs.detect-and-generate.outputs.language == 'python'
@@ -189,7 +194,7 @@ jobs:
       - name: Install & run sanity (JS)
         if: needs.detect-and-generate.outputs.language == 'javascript'
         run: |
-          npm ci 2>/dev/null || npm install
+          if [ -f package.json ]; then npm ci 2>/dev/null || npm install; fi
           npx jest generated-tests/sanity/ \
             --json --outputFile=sanity-results.json || true
 
@@ -241,7 +246,7 @@ jobs:
       - name: Start application
         run: |
           if [ -f "package.json" ]; then
-            npm ci 2>/dev/null || npm install
+            [ -f package.json ] && (npm ci 2>/dev/null || npm install) || echo "No package.json, skipping"
             npm start &
           fi
           if [ -f "app.py" ]; then
@@ -307,7 +312,7 @@ jobs:
       - name: Start application
         run: |
           if [ -f "package.json" ]; then
-            npm ci 2>/dev/null || npm install
+            [ -f package.json ] && (npm ci 2>/dev/null || npm install) || echo "No package.json, skipping"
             npm start &
           fi
           if [ -f "app.py" ]; then
@@ -364,7 +369,7 @@ jobs:
       - name: Start application
         run: |
           if [ -f "package.json" ]; then
-            npm ci 2>/dev/null || npm install
+            [ -f package.json ] && (npm ci 2>/dev/null || npm install) || echo "No package.json, skipping"
             npm start &
           fi
           if [ -f "app.py" ]; then
@@ -417,7 +422,7 @@ jobs:
       - name: Start application
         run: |
           if [ -f "package.json" ]; then
-            npm ci 2>/dev/null || npm install
+            [ -f package.json ] && (npm ci 2>/dev/null || npm install) || echo "No package.json, skipping"
             npm start &
           fi
           if [ -f "app.py" ]; then
@@ -472,7 +477,7 @@ jobs:
       - name: Start application
         run: |
           if [ -f "package.json" ]; then
-            npm ci 2>/dev/null || npm install
+            [ -f package.json ] && (npm ci 2>/dev/null || npm install) || echo "No package.json, skipping"
             npm start &
           fi
           if [ -f "app.py" ]; then
