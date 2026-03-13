@@ -1,0 +1,19 @@
+name: 🌙 Nightly Stress Tests
+
+on:
+  schedule:
+    - cron: "0 2 * * *"    # 2 AM UTC every night
+  workflow_dispatch:         # allow manual trigger from GitHub UI
+
+jobs:
+  nightly-qa:
+    uses: YOUR_ORG/qa-platform/.github/workflows/master-qa.yml@main
+    with:
+      project-name: "my-awesome-app"
+      base-url: "http://localhost:3000"
+      openai-model: "gpt-4o-mini"
+      run-load: true
+      run-stress: true       # ← only enabled here
+      load-vus: 200          # heavier load at night
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
