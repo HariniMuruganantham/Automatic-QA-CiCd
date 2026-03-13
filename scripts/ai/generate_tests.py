@@ -26,6 +26,32 @@ SYSTEM_PROMPT = (
 
 # -- Prompt factory -------------------------------------------------------------
 
+def _build_api_prompt(base_url: str, has_api: bool) -> str:
+    if not has_api:
+        return (
+            "Write 6-8 HTTP-level tests using node-fetch or axios that hit the actual "
+            "deployed URL: " + base_url + "\n\n"
+            "This is a static SPA with NO traditional REST API backend.\n"
+            "Do NOT use supertest or import from '../src/app'.\n"
+            "Test that key pages return 200, response times are under 3000ms, "
+            "and Content-Type headers are correct.\n\n"
+            "Output ONLY the complete test file."
+        )
+    return (
+        "Write 12-16 API tests covering all detectable endpoints at: " + base_url + "\n\n"
+        "Use: Python - pytest + httpx  |  JS - Jest + axios/node-fetch\n\n"
+        "Cover:\n"
+        "1. Happy path for every detectable endpoint (GET, POST, PUT, PATCH, DELETE)\n"
+        "2. 400 Bad Request - missing / malformed request body\n"
+        "3. 401 Unauthorized - missing auth token (only if auth exists)\n"
+        "4. 404 Not Found - non-existent resource ID\n"
+        "5. Response schema validation (check required fields exist)\n"
+        "6. Content-Type: application/json header on responses\n"
+        "7. Response time assertion (< 3000 ms)\n\n"
+        "Output ONLY the complete test file."
+    )
+
+
 def build_prompt(test_type: str, language: str, framework: str,
                  project_name: str, code_sample: str,
                  changed_files: list, base_url: str,
@@ -102,21 +128,7 @@ Test against: {base_url}
 Use imports that match the actual project structure visible in the source code above.
 Output ONLY the complete test file.""",
 
-        "api": base + f"""Write API tests for: {base_url}
-
-{"IMPORTANT: This project is a static SPA with NO traditional REST API. Write HTTP-level tests using node-fetch or axios that hit the actual deployed URL. Test that pages return 200, response times are acceptable, and content-type headers are correct. Do NOT use supertest or import from '../src/app'." if not has_api else f"""Write 12-16 API tests covering all detectable endpoints.
-Use: Python - pytest + httpx  |  JS - Jest + axios/node-fetch
-
-Cover:
-1. Happy path for every detectable endpoint (GET, POST, PUT, PATCH, DELETE)
-2. 400 Bad Request - missing / malformed request body
-3. 401 Unauthorized - missing auth token (only if auth exists)
-4. 404 Not Found - non-existent resource ID
-5. Response schema validation (check required fields exist)
-6. Content-Type: application/json header on responses
-7. Response time assertion (< 3000 ms)"""}
-
-Output ONLY the complete test file.""",
+        "api": base + _build_api_prompt(base_url, has_api),
 
         "regression": base + f"""Write 15-20 REGRESSION tests covering existing functionality.
 Test the live site at: {base_url}
