@@ -154,9 +154,20 @@ jobs:
           fi
           sleep 8
 
+      - name: Install Playwright for smoke
+        if: needs.detect-and-generate.outputs.language == 'javascript'
+        run: |
+          npm install -g @playwright/test
+          npx playwright install --with-deps chromium
+
       - name: Run smoke tests (JS)
         if: needs.detect-and-generate.outputs.language == 'javascript'
-        run: npx jest generated-tests/smoke/ --json --outputFile=smoke-results.json || true
+        run: |
+          npx playwright test generated-tests/smoke/ \
+            --reporter=json \
+            --config=/dev/null \
+            2>/dev/null | tee smoke-pw.json || true
+          python3 $GITHUB_WORKSPACE/qa-platform/scripts/smoke/pw_to_jest.py smoke-pw.json smoke-results.json
 
       - name: Run smoke tests (Python)
         if: needs.detect-and-generate.outputs.language == 'python'
@@ -292,7 +303,17 @@ jobs:
             --reporter-json-export api-newman-results.json \
             --env-var "BASE_URL=${{ inputs.base-url }}" || true
 
-      - name: Run pytest API tests
+      - name: Run Jest API tests (JS)
+        if: needs.detect-and-generate.outputs.language == 'javascript'
+        run: |
+          npm install -g jest ts-jest typescript @types/jest axios node-fetch
+          if [ ! -f jest.config.js ]; then
+            printf 'module.exports = {\n  testEnvironment: "node",\n  transform: { "^.+\\.tsx?$": ["ts-jest", { tsconfig: { strict: false } }] },\n};\n' > jest.config.js
+          fi
+          npx jest generated-tests/api/ --json --outputFile=api-results.json || true
+
+      - name: Run pytest API tests (Python)
+        if: needs.detect-and-generate.outputs.language == 'python'
         run: |
           pytest generated-tests/api/ \
             --json-report --json-report-file=api-results.json -v \
@@ -338,29 +359,23 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Playwright and pytest
+      - name: Install Jest and Playwright for regression
         run: |
-          npm install -g @playwright/test
+          npm install -g jest ts-jest typescript @types/jest @playwright/test
           npx playwright install --with-deps chromium
           pip install --break-system-packages \
             pytest playwright pytest-playwright pytest-json-report
+          if [ ! -f jest.config.js ]; then
+            printf 'module.exports = {\n  testEnvironment: "node",\n  transform: { "^.+\\.tsx?$": ["ts-jest", { tsconfig: { strict: false } }] },\n};\n' > jest.config.js
+          fi
 
-      - name: Start application
+      - name: Run regression tests (JS - Jest for .test.ts)
+        if: needs.detect-and-generate.outputs.language == 'javascript'
         run: |
-          BASE="${{ github.workspace }}/project"
-          if [ -f "$BASE/package.json" ]; then
-            cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
-          fi
-          if [ -f "$BASE/app.py" ]; then
-            pip install --break-system-packages               $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "") || true
-            cd "$BASE" && python app.py &
-          fi
-          sleep 8
+          npx jest generated-tests/regression/ --json --outputFile=regression-py-results.json || true
 
-      - name: Run regression with Playwright
-        run: npx playwright test generated-tests/regression/ --reporter=json --output=regression-pw-results/ || true
-
-      - name: Run regression with pytest
+      - name: Run regression tests (Python - pytest)
+        if: needs.detect-and-generate.outputs.language == 'python'
         run: pytest generated-tests/regression/ --json-report --json-report-file=regression-py-results.json -v || true
 
       - uses: actions/upload-artifact@v4
