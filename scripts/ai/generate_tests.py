@@ -105,7 +105,7 @@ Output ONLY the complete test file.""",
         "api": base + f"""Write API tests for: {base_url}
 
 {"IMPORTANT: This project is a static SPA with NO traditional REST API. Write HTTP-level tests using node-fetch or axios that hit the actual deployed URL. Test that pages return 200, response times are acceptable, and content-type headers are correct. Do NOT use supertest or import from '../src/app'." if not has_api else f"""Write 12-16 API tests covering all detectable endpoints.
-Use: Python → pytest + httpx  |  JS → Jest + axios/node-fetch
+Use: Python - pytest + httpx  |  JS - Jest + axios/node-fetch
 
 Cover:
 1. Happy path for every detectable endpoint (GET, POST, PUT, PATCH, DELETE)
@@ -139,11 +139,11 @@ Output ONLY the complete test file.""",
 BASE_URL = "{base_url}"
 
 Simulate REALISTIC user journeys for THIS specific project (read the source code):
-{"1. User registration → login flow\n2. Authenticated user workflow" if has_auth else
+{"1. User registration -> login flow\n2. Authenticated user workflow" if has_auth else
  "1. Visitor lands on homepage and sees hero content\n2. Visitor browses to key sections (About, Projects, Skills)"}
 3. Primary feature workflow (infer from the source code above)
-4. Form interaction (submit with missing fields → error message appears)
-5. Responsive check — mobile viewport (375 × 812)
+4. Form interaction (submit with missing fields -> error message appears)
+5. Responsive check — mobile viewport (375 x 812)
 6. No console errors on main pages
 {"7. Logout / session end" if has_auth else "7. All nav links navigate to correct routes"}
 
@@ -162,9 +162,9 @@ import {{ sleep, check }} from 'k6';
 const BASE_URL = __ENV.BASE_URL || '{base_url}';
 
 Scenario:
-- Ramp up:   0 → 50 VUs over 30 seconds
+- Ramp up:   0 -> 50 VUs over 30 seconds
 - Hold:      50 VUs for 60 seconds
-- Ramp down: 50 → 0 VUs over 10 seconds
+- Ramp down: 50 -> 0 VUs over 10 seconds
 
 Requirements:
 1. Test the REAL routes of this application — infer from the source code above.
@@ -182,11 +182,11 @@ to find the breaking point of: {base_url}
 const BASE_URL = __ENV.BASE_URL || '{base_url}';
 
 Stages:
-- Stage 1:  0 →  50 VUs /  60s  (warm-up)
-- Stage 2: 50 → 200 VUs / 120s  (ramp stress)
+- Stage 1:  0 ->  50 VUs /  60s  (warm-up)
+- Stage 2: 50 -> 200 VUs / 120s  (ramp stress)
 - Stage 3: 200 VUs      / 180s  (sustained stress)
-- Stage 4: 200 → 500 VUs/  60s  (spike)
-- Stage 5: 500 →   0 VUs/  60s  (recovery)
+- Stage 4: 200 -> 500 VUs/  60s  (spike)
+- Stage 5: 500 ->   0 VUs/  60s  (recovery)
 
 Requirements:
 1. Hit the most critical route of this application (infer from code)
@@ -307,7 +307,7 @@ export default function () {{
 }});
 """
     filepath.write_text(content)
-    print(f"      fallback → {filepath.name}")
+    print(f"      fallback -> {filepath.name}")
 
 
 # ── Newman collection ──────────────────────────────────────────────────────────
@@ -427,7 +427,7 @@ def main():
 
     if has_api:
         write_newman_collection(project_name, base_url)
-        print(f"  📮  Newman collection → generated-tests/api/collection.json")
+        print(f"  📮  Newman collection -> generated-tests/api/collection.json")
 
     summary = {
         "project":            project_name,
