@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-check_results.py
-Smoke gate — exits non-zero if smoke tests failed, blocking the pipeline.
+scripts/smoke/check_results.py
+-------------------------------
+Pipeline gate: exits with code 1 if any smoke test failed.
+Supports both Jest (JSON) and pytest-json-report formats.
 """
 
 import sys
@@ -9,65 +11,77 @@ import json
 from pathlib import Path
 
 
-def check(results_file: str):
+def load_and_check(results_file: str):
     path = Path(results_file)
+
+    # ── File not found ──────────────────────────────────────────
     if not path.exists():
-        print(f"⚠️  Results file not found: {results_file}")
-        print("   Treating as FAIL — cannot proceed without smoke results.")
+        print(f"⚠️  Smoke results file not found: {results_file}")
+        print("   Cannot verify smoke tests passed — treating as FAIL.")
         sys.exit(1)
 
+    # ── Parse ───────────────────────────────────────────────────
     try:
         data = json.loads(path.read_text())
-    except Exception as e:
-        print(f"❌  Cannot parse results file: {e}")
+    except json.JSONDecodeError as e:
+        print(f"❌  Cannot parse results file ({e}) — treating as FAIL.")
         sys.exit(1)
 
-    # Jest format
+    # ── Detect format ───────────────────────────────────────────
     if "numFailedTests" in data:
-        failed  = data["numFailedTests"]
-        total   = data["numTotalTests"]
-        passed  = data["numPassedTests"]
-        fmt     = "jest"
+        # Jest format
+        failed  = data.get("numFailedTests",  0)
+        passed  = data.get("numPassedTests",  0)
+        total   = data.get("numTotalTests",   0)
+        fmt     = "Jest"
 
-    # pytest-json-report format
+        failure_details = []
+        for suite in data.get("testResults", []):
+            for t in suite.get("testResults", []):
+                if t.get("status") == "failed":
+                    name = t.get("fullName", "unknown test")
+                    msgs = t.get("failureMessages") or ["(no message)"]
+                    failure_details.append((name, msgs[0][:250]))
+
     elif "summary" in data:
-        s       = data["summary"]
+        # pytest-json-report format
+        s       = data.get("summary", {})
         failed  = s.get("failed",  0)
-        total   = s.get("total",   0)
         passed  = s.get("passed",  0)
+        total   = s.get("total",   0)
         fmt     = "pytest"
 
+        failure_details = []
+        for t in data.get("tests", []):
+            if t.get("outcome") == "failed":
+                name = t.get("nodeid", "unknown test")
+                msg  = (t.get("call") or {}).get("longrepr", "(no message)")
+                failure_details.append((name, str(msg)[:250]))
+
     else:
-        print("⚠️  Unknown results format — assuming PASS (manual verification recommended)")
+        print("⚠️  Unknown results format — assuming PASS (manual check recommended).")
         sys.exit(0)
 
-    print(f"💨 Smoke Results ({fmt}): {passed}/{total} passed, {failed} failed")
+    # ── Report ──────────────────────────────────────────────────
+    print(f"💨 Smoke Tests ({fmt}): {passed}/{total} passed, {failed} failed")
 
     if failed > 0:
         print(f"\n❌  SMOKE GATE BLOCKED — {failed} test(s) failed")
-        print("   The pipeline will NOT continue until smoke tests pass.\n")
-
-        if fmt == "jest":
-            for suite in data.get("testResults", []):
-                for t in suite.get("testResults", []):
-                    if t.get("status") == "failed":
-                        print(f"   ✗ {t.get('fullName', 'unknown')}")
-                        for msg in (t.get("failureMessages") or [])[:1]:
-                            print(f"     {msg[:200]}")
-
-        elif fmt == "pytest":
-            for t in data.get("tests", []):
-                if t.get("outcome") == "failed":
-                    print(f"   ✗ {t.get('nodeid', 'unknown')}")
-                    msg = (t.get("call") or {}).get("longrepr", "")
-                    if msg:
-                        print(f"     {str(msg)[:200]}")
-
+        print("   Pipeline will NOT continue until all smoke tests pass.\n")
+        for name, msg in failure_details[:5]:
+            print(f"   ✗ {name}")
+            # print first meaningful line of the error
+            first_line = next(
+                (ln.strip() for ln in msg.splitlines() if ln.strip()),
+                "(no details)"
+            )
+            print(f"     {first_line}\n")
         sys.exit(1)
 
-    print("✅  Smoke gate passed — pipeline continues\n")
+    print("✅  Smoke gate passed — continuing pipeline\n")
     sys.exit(0)
 
 
 if __name__ == "__main__":
-    check(sys.argv[1] if len(sys.argv) > 1 else "smoke-results.json")
+    results_file = sys.argv[1] if len(sys.argv) > 1 else "smoke-results.json"
+    load_and_check(results_file)

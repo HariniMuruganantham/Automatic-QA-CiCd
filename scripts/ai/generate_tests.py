@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-generate_tests.py
-Uses OpenAI API to generate tests for all 7 QA types.
-Supports JS/TS and Python projects.
-Models: gpt-4o-mini (default, cheapest), gpt-4o, gpt-4-turbo
+scripts/ai/generate_tests.py
+-----------------------------
+Calls OpenAI to generate all 7 QA test suites automatically.
+Supports JS/TS (Jest, Playwright) and Python (pytest, playwright-python).
 """
 
 import os
@@ -12,131 +12,151 @@ import time
 from pathlib import Path
 from openai import OpenAI, RateLimitError, APIStatusError
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Configuration ─────────────────────────────────────────────────────────────
 
-# Model priority: try primary, fall back to mini if rate-limited
-PRIMARY_MODEL   = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-FALLBACK_MODEL  = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-4o-mini"
+TEST_TYPES    = ["smoke", "sanity", "api", "regression", "uat", "load", "stress"]
 
-TEST_TYPES = ["smoke", "sanity", "api", "regression", "uat", "load", "stress"]
+SYSTEM_PROMPT = (
+    "You are a senior QA automation engineer. "
+    "Output ONLY raw, runnable test code — no explanations, no markdown fences "
+    "(no ```), no preamble, no commentary of any kind. "
+    "The output is written directly to a file and must be valid syntax."
+)
 
-SYSTEM_PROMPT = """You are a senior QA engineer. Output ONLY raw test code — no explanations,
-no markdown code fences, no preamble, no commentary. The output is written directly to a file."""
-
-# ── Prompt builder ────────────────────────────────────────────────────────────
+# ── Prompt factory ─────────────────────────────────────────────────────────────
 
 def build_prompt(test_type: str, language: str, framework: str,
-                 project_name: str, code_sample: str, changed_files: list) -> str:
+                 project_name: str, code_sample: str,
+                 changed_files: list) -> str:
 
     changed_str = "\n".join(changed_files[:10]) if changed_files else "General changes"
 
     lang_hint = {
-        "javascript": f"Use Jest for unit/integration, Playwright for E2E. Framework: {framework}.",
-        "python":     f"Use pytest for unit/integration, playwright-python for E2E. Framework: {framework}.",
-    }.get(language, f"Use appropriate framework for {language}.")
+        "javascript": (
+            f"Use Jest for unit/integration tests. "
+            f"Use @playwright/test for E2E. Framework: {framework}."
+        ),
+        "python": (
+            f"Use pytest with pytest-json-report. "
+            f"Use httpx or requests for HTTP calls. "
+            f"Use playwright.sync_api for E2E. Framework: {framework}."
+        ),
+    }.get(language, f"Use an appropriate testing framework for {language}.")
 
-    base = f"""Project: '{project_name}' | Language: {language} | Framework: {framework}
+    base = f"""Project: '{project_name}'
+Language: {language} | Framework: {framework}
 {lang_hint}
+
 Changed files:
 {changed_str}
 
-Source code context:
+Source code (for context):
 {code_sample[:2000]}
 
 """
 
     prompts = {
 
-        "smoke": base + """Generate 6-8 SMOKE tests that verify:
-1. Application starts and the health/root endpoint returns 2xx
-2. Critical routes return non-500 status codes
-3. Database / external service connections succeed
-4. Required environment variables are present
-5. No fatal import / module errors
+        "smoke": base + """Write 6-8 SMOKE tests that verify:
+1. The application starts and the root / health endpoint returns 2xx
+2. At least 2-3 critical routes return non-500 responses
+3. Database or external service connections succeed (mock if needed)
+4. Required environment variables exist (use os.environ or process.env)
+5. No fatal import errors
 
-Output ONLY the complete test file.""",
+Keep each test fast (under 3 seconds). Output ONLY the complete test file.""",
 
-        "sanity": base + """Generate 8-12 SANITY tests focused on the CHANGED files listed above:
-1. Core business logic of the changed modules
-2. Function input/output contracts
+        "sanity": base + """Write 8-12 SANITY tests focused on the CHANGED files above:
+1. Core business logic of changed modules
+2. Function input/output contracts (happy path)
 3. Critical user-facing flows that touch the changes
-4. No obvious regressions in changed areas
-5. Boundary value checks for changed logic
+4. Boundary value checks for any changed logic
+5. At least one negative/error path per changed module
 
 Output ONLY the complete test file.""",
 
-        "api": base + """Generate 12-16 API tests using:
-- Python: pytest + httpx  |  JavaScript: Jest + supertest
+        "api": base + """Write 12-16 API tests.
+Use: Python → pytest + httpx  |  JS → Jest + supertest (or node-fetch)
 
 Cover:
-1. All detectable endpoints (GET, POST, PUT, PATCH, DELETE)
-2. Happy path for each endpoint
-3. 400 Bad Request — missing/invalid body
-4. 401/403 — missing or invalid auth token
-5. 404 — non-existent resource
-6. Response body schema validation
-7. Pagination / filtering parameters if applicable
-8. Content-Type header validation
+1. Happy path for every detectable endpoint (GET, POST, PUT, PATCH, DELETE)
+2. 400 Bad Request — missing / malformed request body
+3. 401 Unauthorized — missing auth token
+4. 404 Not Found — non-existent resource ID
+5. Response schema validation (check required fields exist)
+6. Content-Type: application/json header on responses
+7. Response time assertion (< 2000 ms)
 
 Output ONLY the complete test file.""",
 
-        "regression": base + """Generate 15-20 REGRESSION tests that protect existing functionality:
-1. Every major feature of the application
+        "regression": base + """Write 15-20 REGRESSION tests covering existing functionality:
+1. Every major feature of the application (infer from code)
 2. Edge cases and boundary conditions
 3. Data transformation / calculation correctness
 4. Integration between modules
-5. Error handling paths
-6. Previously common failure points
+5. Error handling paths (network errors, invalid data)
+6. At least 2 tests that previously would have been common failure points
 
 Output ONLY the complete test file.""",
 
-        "uat": base + """Generate 6-8 UAT (User Acceptance) end-to-end tests using Playwright.
-{'JavaScript: use @playwright/test  |  Python: use playwright.sync_api'}
+        "uat": base + f"""Write 6-8 UAT (end-to-end) tests using Playwright.
+{'JS: import {{ test, expect }} from "@playwright/test"'
+ if language == "javascript"
+ else 'Python: from playwright.sync_api import sync_playwright, expect'}
 
-Cover realistic user journeys:
-1. User registration and login flow
+Simulate realistic user journeys:
+1. User registration → login flow
 2. Primary feature workflow (infer from code)
-3. Create → Read → Update → Delete flow for main entity
-4. Form validation feedback to user
-5. Error recovery / retry scenario
-6. Responsive layout check (mobile viewport 375×812)
+3. Create → view → edit → delete a main entity
+4. Form validation (submit with missing fields → error message appears)
+5. Successful logout / session end
+6. Mobile viewport check (375 × 812)
 
-Include page.screenshot() call inside each test's catch block.
+Add a screenshot call inside each test on failure:
+{'page.screenshot({{ path: "screenshots/test-name.png" }})'
+ if language == "javascript"
+ else 'page.screenshot(path="screenshots/test_name.png")'}
+
 Output ONLY the complete test file.""",
 
-        "load": base + """Generate a k6 LOAD test script (JavaScript):
+        "load": base + """Write a k6 LOAD test script (always JavaScript for k6):
+
+import http from 'k6/http';
+import {{ sleep, check }} from 'k6';
 
 Scenario:
-- Ramp up: 0 → 50 VUs over 30 seconds
-- Sustained load: 50 VUs for 60 seconds
+- Ramp up:  0 → 50 VUs over 30 seconds
+- Hold:     50 VUs for 60 seconds
 - Ramp down: 50 → 0 VUs over 10 seconds
 
 Requirements:
-1. Test all main API endpoints in sequence
-2. Use realistic think time: sleep(Math.random() * 2 + 1)
-3. Thresholds: http_req_duration p(95) < 500, http_req_failed rate < 0.01
-4. Use __ENV.BASE_URL with fallback to http://localhost:3000
-5. Add checks for status codes and response time
+1. Test all main API endpoints in a realistic sequence
+2. Add think time: sleep(Math.random() * 2 + 1)
+3. Thresholds: p(95) < 500ms,  http_req_failed rate < 0.01
+4. Use const BASE_URL = __ENV.BASE_URL || 'http://localhost:3000'
+5. Add check() assertions for status codes
 
-Output ONLY the complete k6 script.""",
+Output ONLY the complete k6 JavaScript file.""",
 
-        "stress": base + """Generate a k6 STRESS test script (JavaScript) to find the breaking point:
+        "stress": base + """Write a k6 STRESS test script (always JavaScript for k6)
+to find the breaking point of the system:
 
-Scenario:
-- Stage 1: Ramp  0 →  50 VUs over 1 min  (warm up)
-- Stage 2: Ramp 50 → 200 VUs over 2 min  (ramp stress)
-- Stage 3: Hold 200 VUs for 3 min         (sustained stress)
-- Stage 4: Spike to 500 VUs for 1 min     (peak spike)
-- Stage 5: Drop back to 0 over 1 min      (recovery check)
+Stages:
+- Stage 1:  0 →  50 VUs /  60s  (warm-up)
+- Stage 2: 50 → 200 VUs / 120s  (ramp stress)
+- Stage 3: 200 VUs      / 180s  (sustained stress)
+- Stage 4: 200 → 500 VUs/  60s  (spike)
+- Stage 5: 500 →   0 VUs/  60s  (recovery)
 
 Requirements:
-1. Monitor error rate at each stage
-2. Track http_req_duration degradation
-3. Thresholds: failure if error rate > 20% (stress allows some failure)
-4. Log VU count alongside response times
-5. Use __ENV.BASE_URL with fallback
+1. Use const BASE_URL = __ENV.BASE_URL || 'http://localhost:3000'
+2. Thresholds: allow up to 20% error rate (stress is expected to break)
+3. Track p95 and p99 response times across stages
+4. Add check() for status codes at each stage
+5. Log error rate increase with console.warn
 
-Output ONLY the complete k6 script.""",
+Output ONLY the complete k6 JavaScript file.""",
     }
 
     return prompts[test_type]
@@ -147,92 +167,126 @@ Output ONLY the complete k6 script.""",
 def get_filename(test_type: str, language: str, project_name: str) -> str:
     safe = project_name.lower().replace(" ", "_").replace("-", "_")
     if test_type in ("load", "stress"):
-        return f"{test_type}-test.js"          # k6 is always JS
-    if test_type == "uat":
-        return f"{safe}_uat.spec.ts" if language == "javascript" else f"{safe}_uat_test.py"
+        return f"{test_type}-test.js"                    # k6 is always JS
     if language == "javascript":
+        if test_type == "uat":
+            return f"{safe}_uat.spec.ts"
         return f"{safe}_{test_type}.test.ts"
-    return f"test_{safe}_{test_type}.py"
+    else:
+        if test_type == "uat":
+            return f"test_{safe}_uat.py"
+        return f"test_{safe}_{test_type}.py"
 
 
-# ── OpenAI caller with retry + fallback ───────────────────────────────────────
+# ── OpenAI caller with retry + model fallback ──────────────────────────────────
 
-def call_openai(client: OpenAI, model: str, system: str, user: str,
-                max_tokens: int = 2500, retries: int = 3) -> str:
+def call_openai(client: OpenAI, model: str,
+                prompt: str, max_tokens: int = 2500) -> str:
+    """Call OpenAI with exponential backoff and markdown fence stripping."""
+    retries = 3
     for attempt in range(retries):
         try:
-            response = client.chat.completions.create(
+            resp = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": user},
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": prompt},
                 ],
                 temperature=0.15,
                 max_tokens=max_tokens,
             )
-            content = response.choices[0].message.content.strip()
+            content = resp.choices[0].message.content.strip()
 
             # Strip accidental markdown fences
             if content.startswith("```"):
                 lines = content.split("\n")
-                start = 1
-                end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-                content = "\n".join(lines[start:end])
+                end   = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
+                content = "\n".join(lines[1:end])
 
             return content
 
         except RateLimitError:
-            wait = 2 ** attempt * 5   # 5s, 10s, 20s
-            print(f"    ⚠️  Rate limited — waiting {wait}s (attempt {attempt+1}/{retries})")
+            wait = 5 * (2 ** attempt)
+            print(f"    ⏳ Rate limited — waiting {wait}s (attempt {attempt+1}/{retries})")
             time.sleep(wait)
 
         except APIStatusError as e:
             if e.status_code == 429:
                 time.sleep(10)
                 continue
-            raise
+            if attempt == retries - 1:
+                raise
+            time.sleep(3)
 
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(3)
-                continue
-            raise
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            time.sleep(3)
 
     raise RuntimeError(f"OpenAI call failed after {retries} attempts")
 
 
-# ── Fallback test writer ───────────────────────────────────────────────────────
+# ── Cost estimator (approximate) ──────────────────────────────────────────────
 
-def write_fallback(out_dir: Path, test_type: str, language: str, project_name: str):
+def estimate_cost(model: str, prompt: str, output: str) -> float:
+    tokens_in  = len(prompt)  // 4
+    tokens_out = len(output)  // 4
+    rates = {
+        "gpt-4o-mini":  (0.00000015,  0.00000060),
+        "gpt-4o":       (0.0000025,   0.0000100),
+        "gpt-4-turbo":  (0.0000100,   0.0000300),
+    }
+    r_in, r_out = rates.get(model, (0.0000025, 0.0000100))
+    return (tokens_in * r_in) + (tokens_out * r_out)
+
+
+# ── Fallback writer ────────────────────────────────────────────────────────────
+
+def write_fallback(out_dir: Path, test_type: str,
+                   language: str, project_name: str):
     filename = get_filename(test_type, language, project_name)
     filepath = out_dir / filename
-    safe = project_name.replace("-", "_").replace(" ", "_")
+    safe     = project_name.replace("-", "_").replace(" ", "_")
 
     if language == "python":
         content = f"""import pytest
 
 class Test{safe.title()}{test_type.title()}Fallback:
-    \"\"\"Fallback {test_type} tests — AI generation failed. Add real tests here.\"\"\"
+    \"\"\"
+    Fallback {test_type} tests for {project_name}.
+    AI generation failed — replace these with real tests.
+    \"\"\"
 
     def test_{test_type}_placeholder(self):
-        \"\"\"TODO: Replace with real {test_type} test for {project_name}.\"\"\"
+        \"\"\"TODO: add real {test_type} test.\"\"\"
         assert True
 """
+    elif test_type in ("load", "stress"):
+        content = f"""// Fallback {test_type} test — AI generation failed.
+// Replace with real k6 script.
+import http from 'k6/http';
+import {{ sleep }} from 'k6';
+export const options = {{ vus: 1, duration: '5s' }};
+export default function () {{
+  http.get(__ENV.BASE_URL || 'http://localhost:3000');
+  sleep(1);
+}}
+"""
     else:
-        content = f"""// Fallback {test_type} tests — AI generation failed. Add real tests here.
+        content = f"""// Fallback {test_type} tests for {project_name} — AI generation failed.
 describe('{project_name} — {test_type} (fallback)', () => {{
-  test('placeholder: replace with real {test_type} tests', () => {{
-    // TODO: Add real {test_type} tests for {project_name}
+  test('placeholder — replace with real {test_type} tests', () => {{
     expect(true).toBe(true);
   }});
 }});
 """
     filepath.write_text(content)
-    print(f"    → fallback written: {filepath}")
+    print(f"      fallback → {filepath.name}")
 
 
-def generate_newman_collection(project_name: str):
-    """Minimal Postman/Newman collection for API stage."""
+# ── Newman collection ──────────────────────────────────────────────────────────
+
+def write_newman_collection(project_name: str, base_url: str = "http://localhost:3000"):
     collection = {
         "info": {
             "name": f"{project_name} API Tests",
@@ -253,13 +307,19 @@ def generate_newman_collection(project_name: str):
                 "event": [{
                     "listen": "test",
                     "script": {"exec": [
-                        "pm.test('Status 200', () => pm.response.to.have.status(200));",
-                        "pm.test('Response < 500ms', () => pm.expect(pm.response.responseTime).to.be.below(500));"
+                        "pm.test('Status 2xx', () => {",
+                        "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 204]);",
+                        "});",
+                        "pm.test('Response < 500ms', () => {",
+                        "  pm.expect(pm.response.responseTime).to.be.below(500);",
+                        "});",
                     ]}
                 }]
             }
         ],
-        "variable": [{"key": "BASE_URL", "value": "http://localhost:3000"}]
+        "variable": [
+            {"key": "BASE_URL", "value": base_url}
+        ]
     }
     api_dir = Path("generated-tests/api")
     api_dir.mkdir(parents=True, exist_ok=True)
@@ -269,114 +329,124 @@ def generate_newman_collection(project_name: str):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
-        print("❌  OPENAI_API_KEY not set")
+        print("❌  OPENAI_API_KEY is not set.")
         raise SystemExit(1)
 
-    model        = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-    language     = os.environ.get("LANGUAGE", "javascript")
-    framework    = os.environ.get("FRAMEWORK", "node")
-    project_name = os.environ.get("PROJECT_NAME", "MyProject")
-    changed_files = [f for f in os.environ.get("CHANGED_FILES", "").split(",") if f]
+    model        = os.environ.get("OPENAI_MODEL",   DEFAULT_MODEL)
+    language     = os.environ.get("LANGUAGE",       "javascript")
+    framework    = os.environ.get("FRAMEWORK",      "node")
+    project_name = os.environ.get("PROJECT_NAME",   "MyProject")
+    changed_files = [
+        f for f in os.environ.get("CHANGED_FILES", "").split(",") if f
+    ]
 
-    # Load richer detection data written by detect_stack.py
-    detection_file = Path("generated-tests/detection.json")
+    # Load richer data from detect_stack.py
+    detection_path = Path("generated-tests/detection.json")
     detection: dict = {}
-    if detection_file.exists():
-        detection = json.loads(detection_file.read_text())
-        language  = detection.get("language", language)
-        framework = detection.get("framework", framework)
-        if not changed_files:
-            changed_files = detection.get("changed_files", [])
+    if detection_path.exists():
+        try:
+            detection     = json.loads(detection_path.read_text())
+            language      = detection.get("language",  language)
+            framework     = detection.get("framework", framework)
+            changed_files = changed_files or detection.get("changed_files", [])
+        except Exception:
+            pass
 
     code_sample = detection.get("code_sample", "")
     if not code_sample:
-        ws = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+        ws          = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
         code_sample = _read_code_sample(ws, language)
 
     client = OpenAI(api_key=api_key)
 
-    print(f"🤖 Generating tests with OpenAI ({model})")
-    print(f"   Project:   {project_name}")
-    print(f"   Language:  {language} / {framework}")
-    print(f"   Changed:   {len(changed_files)} files")
+    print(f"🤖 OpenAI test generation")
+    print(f"   Model:    {model}")
+    print(f"   Project:  {project_name}")
+    print(f"   Language: {language} / {framework}")
+    print(f"   Changed:  {len(changed_files)} files")
     print()
 
-    generated_files: list[str] = []
-    cost_estimate = 0.0
+    generated: list  = []
+    total_cost: float = 0.0
 
     for test_type in TEST_TYPES:
-        print(f"  ⚙️  {test_type:<12}", end=" ", flush=True)
+        print(f"  ⚙️  {test_type:<12}", end="  ", flush=True)
 
         out_dir = Path(f"generated-tests/{test_type}")
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        prompt = build_prompt(test_type, language, framework,
-                              project_name, code_sample, changed_files)
+        prompt = build_prompt(
+            test_type, language, framework,
+            project_name, code_sample, changed_files
+        )
 
         try:
-            content = call_openai(client, model, SYSTEM_PROMPT, prompt)
+            content = call_openai(client, model, prompt)
 
             filename = get_filename(test_type, language, project_name)
             filepath = out_dir / filename
             filepath.write_text(content)
-            generated_files.append(str(filepath))
+            generated.append(str(filepath))
 
-            # Rough token-based cost estimate (gpt-4o-mini: $0.15/1M in, $0.60/1M out)
-            tokens_in  = len(prompt) // 4
-            tokens_out = len(content) // 4
-            if "mini" in model:
-                cost_estimate += (tokens_in * 0.00000015) + (tokens_out * 0.00000060)
-            elif "4o" in model:
-                cost_estimate += (tokens_in * 0.0000025)  + (tokens_out * 0.0000100)
-
-            print(f"✅  → {filepath.name}  (~{tokens_out} tokens)")
+            cost = estimate_cost(model, prompt, content)
+            total_cost += cost
+            tokens_out  = len(content) // 4
+            print(f"✅  {filepath.name}  (~{tokens_out} tokens, ~${cost:.5f})")
 
         except Exception as e:
-            print(f"⚠️   Failed ({e.__class__.__name__}: {str(e)[:60]})")
+            print(f"⚠️   {e.__class__.__name__}: {str(e)[:60]}")
             write_fallback(out_dir, test_type, language, project_name)
 
-        # Avoid hitting rate limits — 1s gap between calls
-        time.sleep(1.2)
+        # Respect rate limits
+        time.sleep(1.5)
 
     # Newman collection for the API stage
     if detection.get("has_api", True):
-        generate_newman_collection(project_name)
-        print(f"  📮  Newman collection written")
+        write_newman_collection(project_name)
+        print(f"  📮  Newman collection → generated-tests/api/collection.json")
 
-    # Summary JSON
+    # Persist summary
     summary = {
-        "project":         project_name,
-        "language":        language,
-        "framework":       framework,
-        "model":           model,
-        "generated_files": generated_files,
-        "test_types":      TEST_TYPES,
-        "estimated_cost_usd": round(cost_estimate, 5),
+        "project":             project_name,
+        "language":            language,
+        "framework":           framework,
+        "model":               model,
+        "generated_files":     generated,
+        "test_types":          TEST_TYPES,
+        "estimated_cost_usd":  round(total_cost, 5),
     }
     Path("generated-tests/summary.json").write_text(json.dumps(summary, indent=2))
 
     # GitHub Actions output
-    output_file = os.environ.get("GITHUB_OUTPUT", "/dev/null")
-    with open(output_file, "a") as f:
-        f.write(f"test-files={','.join(generated_files)}\n")
+    output_file = os.environ.get("GITHUB_OUTPUT", "")
+    if output_file:
+        with open(output_file, "a") as f:
+            f.write(f"test-files={','.join(generated)}\n")
 
-    print(f"\n✅  Generated {len(generated_files)}/{len(TEST_TYPES)} test files")
-    print(f"💰  Estimated cost: ${cost_estimate:.5f} USD ({model})")
+    print()
+    print(f"✅  Generated {len(generated)} / {len(TEST_TYPES)} test files")
+    print(f"💰  Estimated cost: ${total_cost:.5f} USD  ({model})")
 
 
 def _read_code_sample(workspace: str, language: str) -> str:
-    p = Path(workspace)
-    exts = {"javascript": [".ts", ".js", ".tsx"], "python": [".py"]}.get(language, [".py"])
-    skip = ["node_modules", ".git", "venv", "__pycache__", "dist", "build", ".next"]
+    p    = Path(workspace)
+    exts = {
+        "javascript": [".ts", ".tsx", ".js", ".jsx"],
+        "python":     [".py"],
+    }.get(language, [".py"])
+    skip = {"node_modules", ".git", "venv", "__pycache__", "dist", "build", ".next"}
+
     samples = []
     for ext in exts:
-        for f in list(p.rglob(f"*{ext}"))[:6]:
-            if any(s in str(f) for s in skip):
+        for f in sorted(p.rglob(f"*{ext}"))[:8]:
+            if any(s in f.parts for s in skip):
                 continue
             try:
-                samples.append(f.read_text(errors="ignore")[:600])
+                text = f.read_text(errors="ignore")
+                if len(text) > 50:
+                    samples.append(text[:600])
             except Exception:
                 pass
         if samples:

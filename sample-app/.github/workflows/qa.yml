@@ -1,0 +1,22 @@
+name: QA — Sample App
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * *"
+
+jobs:
+  qa:
+    uses: HariniMuruganantham/Automatic-QA-CiCd/.github/workflows/master-qa.yml@main
+    with:
+      project-name:  "sample-app"
+      base-url:      "http://localhost:3000"
+      openai-model:  "gpt-4o-mini"
+      run-load:      true
+      run-stress:    ${{ github.event_name == 'schedule' }}
+      load-vus:      30
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

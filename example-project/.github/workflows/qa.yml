@@ -1,22 +1,30 @@
 name: QA
 
+# ─── Copy this file into ANY of your projects ────────────────────────────────
+# It calls the central pipeline in HariniMuruganantham/Automatic-QA-CiCd
+# The only things you need to change per-project:
+#   • project-name   → your app name (shown in reports)
+#   • base-url       → where your app runs locally
+#   • openai-model   → gpt-4o-mini (cheap) or gpt-4o (best)
+# ─────────────────────────────────────────────────────────────────────────────
+
 on:
   push:
-    branches: ["**"]
+    branches: ["**"]              # every branch, every push
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop]     # PR checks
   schedule:
-    - cron: "0 2 * * *"   # nightly stress test
+    - cron: "0 2 * * *"           # nightly stress (run-stress: true below)
 
 jobs:
   qa:
-    uses: YOUR_ORG/qa-platform/.github/workflows/master-qa.yml@main
+    uses: HariniMuruganantham/Automatic-QA-CiCd/.github/workflows/master-qa.yml@main
     with:
-      project-name: "my-awesome-app"
-      base-url: "http://localhost:3000"
-      openai-model: "gpt-4o-mini"       # cheapest — change to gpt-4o for best quality
-      run-load: true
-      run-stress: ${{ github.event_name == 'schedule' }}  # stress only nightly
-      load-vus: 50
+      project-name:  "my-app"                  # ← change this
+      base-url:      "http://localhost:3000"    # ← change if different port
+      openai-model:  "gpt-4o-mini"             # gpt-4o-mini (~$0.01/run) or gpt-4o
+      run-load:      true
+      run-stress:    ${{ github.event_name == 'schedule' }}   # stress = nightly only
+      load-vus:      50
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

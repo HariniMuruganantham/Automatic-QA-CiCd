@@ -30,50 +30,49 @@ on:
       OPENAI_API_KEY:
         required: true
 
-env:
-  REPORT_DIR: qa-report
-
 jobs:
-  # ─────────────────────────────────────────
-  # STAGE 1: Detect stack & generate tests
-  # ─────────────────────────────────────────
+
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 1 — Detect stack & AI-generate all 7 test suites
+  # ─────────────────────────────────────────────────────────────
   detect-and-generate:
     name: 🤖 AI · Detect Stack & Generate Tests
     runs-on: ubuntu-latest
     outputs:
-      language: ${{ steps.detect.outputs.language }}
+      language:  ${{ steps.detect.outputs.language }}
       framework: ${{ steps.detect.outputs.framework }}
-      has-api: ${{ steps.detect.outputs.has-api }}
-      test-files: ${{ steps.generate.outputs.test-files }}
+      has-api:   ${{ steps.detect.outputs.has-api }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
-      - name: Setup Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install AI script deps
-        run: pip install openai --break-system-packages 2>/dev/null || pip install openai
+      - name: Install script dependencies
+        run: pip install openai --break-system-packages
 
-      - name: 🔍 Detect Stack
+      - name: 🔍 Detect stack
         id: detect
-        run: python $GITHUB_WORKSPACE/.qa-platform/scripts/detect_stack.py
+        run: python $GITHUB_WORKSPACE/scripts/detect_stack.py
         env:
           WORKSPACE: ${{ github.workspace }}
 
-      - name: 🤖 Generate Tests via OpenAI
+      - name: 🤖 Generate tests via OpenAI
         id: generate
-        run: python $GITHUB_WORKSPACE/.qa-platform/scripts/ai/generate_tests.py
+        run: python $GITHUB_WORKSPACE/scripts/ai/generate_tests.py
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ inputs.openai-model }}
-          LANGUAGE: ${{ steps.detect.outputs.language }}
-          FRAMEWORK: ${{ steps.detect.outputs.framework }}
-          CHANGED_FILES: ${{ steps.detect.outputs.changed-files }}
-          PROJECT_NAME: ${{ inputs.project-name }}
+          OPENAI_API_KEY:  ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL:    ${{ inputs.openai-model }}
+          LANGUAGE:        ${{ steps.detect.outputs.language }}
+          FRAMEWORK:       ${{ steps.detect.outputs.framework }}
+          CHANGED_FILES:   ${{ steps.detect.outputs.changed-files }}
+          PROJECT_NAME:    ${{ inputs.project-name }}
 
       - name: Upload generated tests
         uses: actions/upload-artifact@v4
@@ -82,62 +81,78 @@ jobs:
           path: generated-tests/
           retention-days: 7
 
-  # ─────────────────────────────────────────
-  # STAGE 2: SMOKE — Gate check (fast)
-  # ─────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 2 — SMOKE (gate — failure stops everything)
+  # ─────────────────────────────────────────────────────────────
   smoke:
     name: 💨 Smoke Tests
     runs-on: ubuntu-latest
     needs: detect-and-generate
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download generated tests
+        uses: actions/download-artifact@v4
         with:
           name: generated-tests
           path: generated-tests/
 
-      - name: Setup Node
+      - name: Setup Node 20
         if: needs.detect-and-generate.outputs.language == 'javascript'
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
-      - name: Setup Python
+      - name: Setup Python 3.11
         if: needs.detect-and-generate.outputs.language == 'python'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps (JS)
+      - name: Install JS dependencies
         if: needs.detect-and-generate.outputs.language == 'javascript'
         run: npm ci
 
-      - name: Install deps (Python)
+      - name: Install Python dependencies
         if: needs.detect-and-generate.outputs.language == 'python'
-        run: pip install -r requirements.txt pytest pytest-json-report --break-system-packages 2>/dev/null || pip install -r requirements.txt pytest pytest-json-report
+        run: |
+          pip install --break-system-packages \
+            pytest pytest-json-report requests httpx \
+            $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "")
 
-      - name: Start app
+      - name: Start application
         run: |
           if [ -f "package.json" ]; then
             npm start &
           elif [ -f "manage.py" ]; then
             python manage.py runserver &
-          elif [ -f "app.py" ] || [ -f "main.py" ]; then
-            python ${ENTRYPOINT:-app.py} &
+          elif [ -f "app.py" ]; then
+            python app.py &
+          elif [ -f "main.py" ]; then
+            python main.py &
           fi
-          sleep 5
+          sleep 6
 
-      - name: 💨 Run Smoke Tests (JS)
+      - name: 💨 Run smoke tests (JS)
         if: needs.detect-and-generate.outputs.language == 'javascript'
-        run: npx jest generated-tests/smoke/ --json --outputFile=smoke-results.json || true
+        run: |
+          npx jest generated-tests/smoke/ \
+            --json --outputFile=smoke-results.json || true
 
-      - name: 💨 Run Smoke Tests (Python)
+      - name: 💨 Run smoke tests (Python)
         if: needs.detect-and-generate.outputs.language == 'python'
-        run: pytest generated-tests/smoke/ --json-report --json-report-file=smoke-results.json -v || true
+        run: |
+          pytest generated-tests/smoke/ \
+            --json-report --json-report-file=smoke-results.json -v || true
 
-      - name: Check smoke result (gate)
-        run: python .qa-platform/scripts/smoke/check_results.py smoke-results.json
+      - name: Install gate dep
+        run: pip install --break-system-packages --quiet || true
+
+      - name: 🚦 Smoke gate check
+        run: python $GITHUB_WORKSPACE/scripts/smoke/check_results.py smoke-results.json
 
       - name: Upload smoke results
         if: always()
@@ -146,13 +161,14 @@ jobs:
           name: smoke-results
           path: smoke-results.json
 
-  # ─────────────────────────────────────────
-  # STAGE 3: SANITY + API (parallel)
-  # ─────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 3 — SANITY (parallel with API)
+  # ─────────────────────────────────────────────────────────────
   sanity:
     name: 🔍 Sanity Tests
     runs-on: ubuntu-latest
     needs: [detect-and-generate, smoke]
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -172,13 +188,17 @@ jobs:
         if: needs.detect-and-generate.outputs.language == 'javascript'
         run: |
           npm ci
-          npx jest generated-tests/sanity/ --json --outputFile=sanity-results.json || true
+          npx jest generated-tests/sanity/ \
+            --json --outputFile=sanity-results.json || true
 
       - name: Install & run sanity (Python)
         if: needs.detect-and-generate.outputs.language == 'python'
         run: |
-          pip install -r requirements.txt pytest pytest-json-report --break-system-packages 2>/dev/null || true
-          pytest generated-tests/sanity/ --json-report --json-report-file=sanity-results.json -v || true
+          pip install --break-system-packages \
+            pytest pytest-json-report requests httpx \
+            $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
+          pytest generated-tests/sanity/ \
+            --json-report --json-report-file=sanity-results.json -v || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -186,11 +206,15 @@ jobs:
           name: sanity-results
           path: sanity-results.json
 
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 3b — API TESTS (parallel with sanity)
+  # ─────────────────────────────────────────────────────────────
   api-tests:
     name: 🔌 API Tests
     runs-on: ubuntu-latest
     needs: [detect-and-generate, smoke]
     if: needs.detect-and-generate.outputs.has-api == 'true'
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -207,23 +231,32 @@ jobs:
       - name: Install Newman + Python deps
         run: |
           npm install -g newman newman-reporter-htmlextra
-          pip install httpx pytest pytest-json-report requests --break-system-packages 2>/dev/null || pip install httpx pytest pytest-json-report requests
+          pip install --break-system-packages \
+            httpx pytest pytest-json-report requests
 
-      - name: Start app
+      - name: Start application
         run: |
           if [ -f "package.json" ]; then npm ci && npm start & fi
-          if [ -f "app.py" ] || [ -f "main.py" ]; then python ${ENTRYPOINT:-app.py} & fi
-          sleep 5
+          if [ -f "app.py" ]; then
+            pip install --break-system-packages \
+              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "flask fastapi uvicorn") || true
+            python app.py &
+          fi
+          sleep 6
 
-      - name: 🔌 Run Newman API tests
-        if: hashFiles('generated-tests/api/*.json') != ''
+      - name: 🔌 Run Newman collection
+        if: hashFiles('generated-tests/api/collection.json') != ''
         run: |
           newman run generated-tests/api/collection.json \
             --reporters cli,json \
-            --reporter-json-export api-newman-results.json || true
+            --reporter-json-export api-newman-results.json \
+            --env-var "BASE_URL=${{ inputs.base-url }}" || true
 
       - name: 🔌 Run pytest API tests
-        run: pytest generated-tests/api/ --json-report --json-report-file=api-results.json -v || true
+        run: |
+          pytest generated-tests/api/ \
+            --json-report --json-report-file=api-results.json -v \
+            --ignore=generated-tests/api/collection.json || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -233,14 +266,15 @@ jobs:
             api-results.json
             api-newman-results.json
 
-  # ─────────────────────────────────────────
-  # STAGE 4: REGRESSION
-  # ─────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 4 — REGRESSION
+  # ─────────────────────────────────────────────────────────────
   regression:
     name: 🔁 Regression Tests
     runs-on: ubuntu-latest
     needs: [detect-and-generate, sanity, api-tests]
     if: always() && needs.smoke.result == 'success'
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -258,40 +292,47 @@ jobs:
         run: |
           npm install -g @playwright/test
           npx playwright install --with-deps chromium
-          pip install pytest playwright pytest-playwright pytest-json-report --break-system-packages 2>/dev/null || true
+          pip install --break-system-packages \
+            pytest playwright pytest-playwright pytest-json-report
 
-      - name: Start app
+      - name: Start application
         run: |
-          if [ -f "package.json" ]; then npm start & fi
-          if [ -f "app.py" ] || [ -f "main.py" ]; then python ${ENTRYPOINT:-app.py} & fi
-          sleep 5
+          if [ -f "package.json" ]; then npm ci && npm start & fi
+          if [ -f "app.py" ]; then
+            pip install --break-system-packages \
+              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
+            python app.py &
+          fi
+          sleep 6
 
-      - name: 🔁 Run Regression (Playwright)
+      - name: 🔁 Run regression (Playwright)
         run: |
           npx playwright test generated-tests/regression/ \
             --reporter=json \
-            --output=regression-results/ || true
+            --output=regression-pw-results/ || true
 
-      - name: 🔁 Run Regression (pytest)
+      - name: 🔁 Run regression (pytest)
         run: |
           pytest generated-tests/regression/ \
-            --json-report --json-report-file=regression-py-results.json -v || true
+            --json-report --json-report-file=regression-py-results.json \
+            -v || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: regression-results
           path: |
-            regression-results/
+            regression-pw-results/
             regression-py-results.json
 
-  # ─────────────────────────────────────────
-  # STAGE 5: UAT
-  # ─────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 5 — UAT (Playwright E2E user journeys)
+  # ─────────────────────────────────────────────────────────────
   uat:
     name: 👤 UAT Tests
     runs-on: ubuntu-latest
     needs: [detect-and-generate, smoke]
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -307,10 +348,14 @@ jobs:
           npm install -g @playwright/test
           npx playwright install --with-deps chromium
 
-      - name: Start app
+      - name: Start application
         run: |
           if [ -f "package.json" ]; then npm ci && npm start & fi
-          if [ -f "app.py" ]; then pip install -r requirements.txt && python app.py & fi
+          if [ -f "app.py" ]; then
+            pip install --break-system-packages \
+              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
+            python app.py &
+          fi
           sleep 8
 
       - name: 👤 Run UAT (Playwright E2E)
@@ -325,14 +370,15 @@ jobs:
           name: uat-results
           path: uat-results/
 
-  # ─────────────────────────────────────────
-  # STAGE 6: LOAD / STRESS
-  # ─────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 6a — LOAD TESTS
+  # ─────────────────────────────────────────────────────────────
   load-test:
     name: 📈 Load Tests
     runs-on: ubuntu-latest
     needs: [smoke]
     if: inputs.run-load == true
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -347,22 +393,28 @@ jobs:
             --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
             --keyserver hkp://keyserver.ubuntu.com:80 \
             --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] \
+            https://dl.k6.io/deb stable main" \
             | sudo tee /etc/apt/sources.list.d/k6.list
-          sudo apt-get update && sudo apt-get install k6 -y
+          sudo apt-get update -qq && sudo apt-get install k6 -y
 
-      - name: Start app
+      - name: Start application
         run: |
           if [ -f "package.json" ]; then npm ci && npm start & fi
-          if [ -f "app.py" ]; then pip install -r requirements.txt && python app.py & fi
+          if [ -f "app.py" ]; then
+            pip install --break-system-packages \
+              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
+            python app.py &
+          fi
           sleep 8
 
-      - name: 📈 Run Load Test
+      - name: 📈 Run load test
         run: |
           k6 run generated-tests/load/load-test.js \
             --vus ${{ inputs.load-vus }} \
             --duration 60s \
-            --out json=load-results.json || true
+            --out json=load-results.json \
+            -e BASE_URL=${{ inputs.base-url }} || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -370,11 +422,15 @@ jobs:
           name: load-results
           path: load-results.json
 
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 6b — STRESS TESTS (nightly only)
+  # ─────────────────────────────────────────────────────────────
   stress-test:
     name: 💥 Stress Tests
     runs-on: ubuntu-latest
     needs: [smoke]
     if: inputs.run-stress == true
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -389,20 +445,26 @@ jobs:
             --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
             --keyserver hkp://keyserver.ubuntu.com:80 \
             --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] \
+            https://dl.k6.io/deb stable main" \
             | sudo tee /etc/apt/sources.list.d/k6.list
-          sudo apt-get update && sudo apt-get install k6 -y
+          sudo apt-get update -qq && sudo apt-get install k6 -y
 
-      - name: Start app
+      - name: Start application
         run: |
           if [ -f "package.json" ]; then npm ci && npm start & fi
-          if [ -f "app.py" ]; then pip install -r requirements.txt && python app.py & fi
+          if [ -f "app.py" ]; then
+            pip install --break-system-packages \
+              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
+            python app.py &
+          fi
           sleep 8
 
-      - name: 💥 Run Stress Test
+      - name: 💥 Run stress test
         run: |
           k6 run generated-tests/load/stress-test.js \
-            --out json=stress-results.json || true
+            --out json=stress-results.json \
+            -e BASE_URL=${{ inputs.base-url }} || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -410,18 +472,19 @@ jobs:
           name: stress-results
           path: stress-results.json
 
-  # ─────────────────────────────────────────
-  # STAGE 7: REPORT
-  # ─────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 7 — REPORT (always runs, collects everything)
+  # ─────────────────────────────────────────────────────────────
   report:
     name: 📊 Generate Report
     runs-on: ubuntu-latest
     needs: [smoke, sanity, api-tests, regression, uat, load-test]
     if: always()
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all results
+      - name: Download all test results
         uses: actions/download-artifact@v4
         with:
           path: all-results/
@@ -430,29 +493,29 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install report deps
-        run: pip install jinja2 openai --break-system-packages 2>/dev/null || pip install jinja2 openai
+      - name: Install report dependencies
+        run: pip install openai jinja2 --break-system-packages
 
-      - name: 📊 Generate HTML Report
+      - name: 📊 Generate HTML report
         run: |
-          python .qa-platform/scripts/report/generate_report.py \
+          python $GITHUB_WORKSPACE/scripts/report/generate_report.py \
             --results-dir all-results/ \
-            --project "${{ inputs.project-name }}" \
-            --commit "${{ github.sha }}" \
-            --branch "${{ github.ref_name }}" \
-            --model "${{ inputs.openai-model }}" \
-            --output qa-report.html
+            --project     "${{ inputs.project-name }}" \
+            --commit      "${{ github.sha }}" \
+            --branch      "${{ github.ref_name }}" \
+            --model       "${{ inputs.openai-model }}" \
+            --output      qa-report.html
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      - name: 💾 Save Report Artifact (30 days)
+      - name: 💾 Save report artifact (30 days)
         uses: actions/upload-artifact@v4
         with:
           name: qa-report-${{ github.sha }}
           path: qa-report.html
           retention-days: 30
 
-      - name: 📝 Comment on PR
+      - name: 💬 Post PR comment
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
@@ -460,31 +523,45 @@ jobs:
             const fs = require('fs');
             let summary;
             try {
-              summary = JSON.parse(fs.readFileSync('all-results/report-summary.json', 'utf8'));
+              summary = JSON.parse(
+                fs.readFileSync('all-results/report-summary.json', 'utf8')
+              );
             } catch(e) {
-              summary = { total: 0, passed: 0, failed: 0, ai_summary: 'Report unavailable.', smoke:{passed:0,failed:0,skipped:0}, sanity:{passed:0,failed:0,skipped:0}, api:{passed:0,failed:0,skipped:0}, regression:{passed:0,failed:0,skipped:0}, uat:{passed:0,failed:0,skipped:0}, load:{p95:0,errors:0,vus:0} };
+              summary = {
+                total: 0, passed: 0, failed: 0,
+                ai_summary: 'Report data unavailable.',
+                smoke:      { passed: 0, failed: 0, skipped: 0 },
+                sanity:     { passed: 0, failed: 0, skipped: 0 },
+                api:        { passed: 0, failed: 0, skipped: 0 },
+                regression: { passed: 0, failed: 0, skipped: 0 },
+                uat:        { passed: 0, failed: 0, skipped: 0 },
+                load:       { p95: 0, errors: 0, vus: 0 }
+              };
             }
-            const emoji = summary.failed === 0 ? '✅' : '❌';
+
+            const emoji  = summary.failed === 0 ? '✅' : '❌';
+            const s      = summary;
+
             const body = `## ${emoji} QA Report — ${{ inputs.project-name }}
 
-| Suite | Passed | Failed | Skipped |
-|-------|--------|--------|---------|
-| 💨 Smoke | ${summary.smoke?.passed ?? 0} | ${summary.smoke?.failed ?? 0} | ${summary.smoke?.skipped ?? 0} |
-| 🔍 Sanity | ${summary.sanity?.passed ?? 0} | ${summary.sanity?.failed ?? 0} | ${summary.sanity?.skipped ?? 0} |
-| 🔌 API | ${summary.api?.passed ?? 0} | ${summary.api?.failed ?? 0} | ${summary.api?.skipped ?? 0} |
-| 🔁 Regression | ${summary.regression?.passed ?? 0} | ${summary.regression?.failed ?? 0} | ${summary.regression?.skipped ?? 0} |
-| 👤 UAT | ${summary.uat?.passed ?? 0} | ${summary.uat?.failed ?? 0} | ${summary.uat?.skipped ?? 0} |
-| 📈 Load | p95: ${summary.load?.p95 ?? 0}ms | errors: ${summary.load?.errors ?? 0}% | — |
+            | Suite | ✅ Passed | ❌ Failed | ⊘ Skipped |
+            |-------|-----------|-----------|-----------|
+            | 💨 Smoke      | ${s.smoke?.passed ?? 0}      | ${s.smoke?.failed ?? 0}      | ${s.smoke?.skipped ?? 0}      |
+            | 🔍 Sanity     | ${s.sanity?.passed ?? 0}     | ${s.sanity?.failed ?? 0}     | ${s.sanity?.skipped ?? 0}     |
+            | 🔌 API        | ${s.api?.passed ?? 0}        | ${s.api?.failed ?? 0}        | ${s.api?.skipped ?? 0}        |
+            | 🔁 Regression | ${s.regression?.passed ?? 0} | ${s.regression?.failed ?? 0} | ${s.regression?.skipped ?? 0} |
+            | 👤 UAT        | ${s.uat?.passed ?? 0}        | ${s.uat?.failed ?? 0}        | ${s.uat?.skipped ?? 0}        |
+            | 📈 Load       | p95: ${s.load?.p95 ?? 0}ms   | errors: ${s.load?.errors ?? 0}% | — |
 
-**Total: ${summary.passed}/${summary.total} passed**
+            **Total: ${s.passed} / ${s.total} passed**
 
-🤖 AI Analysis: ${summary.ai_summary}
+            🤖 **AI Analysis:** ${s.ai_summary}
 
-📊 [View Full Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+            📊 [View Full Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
 
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body
-            });
+                        github.rest.issues.createComment({
+                          issue_number: context.issue.number,
+                          owner:        context.repo.owner,
+                          repo:         context.repo.repo,
+                          body
+                        });
