@@ -110,6 +110,39 @@ def detect_has_api(workspace: str) -> bool:
     return any((p / ind).exists() for ind in indicators)
 
 
+def detect_has_auth(workspace: str) -> bool:
+    """Return True if the project has authentication (login/register/logout)."""
+    p = Path(workspace)
+    auth_indicators = [
+        "login", "register", "logout", "auth", "signin", "signup",
+        "session", "jwt", "oauth", "passport",
+    ]
+    skip = {"node_modules", ".git", "venv", "__pycache__", "dist", "build"}
+
+    # Check directory/file names
+    for item in p.rglob("*"):
+        if any(s in item.parts for s in skip):
+            continue
+        name = item.name.lower()
+        if any(a in name for a in auth_indicators):
+            return True
+
+    # Check package.json for auth deps
+    pkg_path = p / "package.json"
+    if pkg_path.exists():
+        try:
+            pkg  = json.loads(pkg_path.read_text())
+            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            auth_pkgs = {"passport", "jsonwebtoken", "next-auth", "auth0", "firebase",
+                         "supabase", "clerk", "@auth0/auth0-react", "jwt-decode"}
+            if auth_pkgs & set(deps.keys()):
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
 def get_changed_files() -> list:
     """Return list of files changed in the last commit."""
     try:
@@ -167,8 +200,10 @@ def main():
     workspace = os.environ.get("WORKSPACE", os.getcwd())
     print(f"🔍 Detecting stack in: {workspace}\n")
 
+    base_url             = os.environ.get("BASE_URL", "http://localhost:3000").rstrip("/")
     language, framework  = detect_language(workspace)
     has_api              = detect_has_api(workspace)
+    has_auth             = detect_has_auth(workspace)
     changed_files        = get_changed_files()
     code_sample          = read_code_sample(workspace, language)
 
@@ -176,6 +211,8 @@ def main():
     print(f"   Language:      {language}")
     print(f"   Framework:     {framework}")
     print(f"   Has API:       {has_api}")
+    print(f"   Has Auth:      {has_auth}")
+    print(f"   Base URL:      {base_url}")
     print(f"   Changed files: {len(changed_files)}")
     print()
 
@@ -185,6 +222,8 @@ def main():
         "language":      language,
         "framework":     framework,
         "has_api":       has_api,
+        "has_auth":      has_auth,
+        "base_url":      base_url,
         "changed_files": changed_files,
         "code_sample":   code_sample[:4000],
         "workspace":     workspace,

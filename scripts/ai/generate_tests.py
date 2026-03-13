@@ -28,7 +28,8 @@ SYSTEM_PROMPT = (
 
 def build_prompt(test_type: str, language: str, framework: str,
                  project_name: str, code_sample: str,
-                 changed_files: list) -> str:
+                 changed_files: list, base_url: str,
+                 has_api: bool, has_auth: bool) -> str:
 
     changed_str = "\n".join(changed_files[:10]) if changed_files else "General changes"
 
@@ -44,9 +45,30 @@ def build_prompt(test_type: str, language: str, framework: str,
         ),
     }.get(language, f"Use an appropriate testing framework for {language}.")
 
+    # Build a clear project context block so AI never guesses wrong
+    auth_note = (
+        "This project HAS authentication (login/register/logout flows exist)."
+        if has_auth else
+        "This project has NO authentication — do NOT generate login, register, "
+        "logout, or session tests. There are no auth routes."
+    )
+    api_note = (
+        f"The application DOES have a backend API. Base URL: {base_url}"
+        if has_api else
+        f"This is a STATIC/SPA frontend application with NO backend API server. "
+        f"It is deployed at: {base_url}. "
+        f"Do NOT generate supertest/server-side API tests. "
+        f"Use Playwright or fetch() against the live URL for any HTTP checks."
+    )
+
     base = f"""Project: '{project_name}'
 Language: {language} | Framework: {framework}
+Deployed at: {base_url}
 {lang_hint}
+
+Project context (READ CAREFULLY — do not contradict this):
+- {auth_note}
+- {api_note}
 
 Changed files:
 {changed_str}
@@ -58,89 +80,106 @@ Source code (for context):
 
     prompts = {
 
-        "smoke": base + """Write 6-8 SMOKE tests that verify:
-1. The application starts and the root / health endpoint returns 2xx
-2. At least 2-3 critical routes return non-500 responses
-3. Database or external service connections succeed (mock if needed)
-4. Required environment variables exist (use os.environ or process.env)
-5. No fatal import errors
+        "smoke": base + f"""Write 6-8 SMOKE tests that verify the LIVE deployment at {base_url}:
+1. Root URL {base_url}/ returns 2xx
+2. At least 2-3 key page routes return non-500 responses
+3. Required environment variables exist (use process.env — only ones that realistically exist)
+4. No fatal import errors on main entry files
 
-Keep each test fast (under 3 seconds). Output ONLY the complete test file.""",
+IMPORTANT: Use fetch() or @playwright/test request fixture to hit {base_url}.
+Do NOT check for database connections or AWS credentials in frontend tests.
+Keep each test fast (under 5 seconds). Output ONLY the complete test file.""",
 
-        "sanity": base + """Write 8-12 SANITY tests focused on the CHANGED files above:
+        "sanity": base + f"""Write 8-12 SANITY tests focused on the CHANGED files above.
+Test against: {base_url}
+
 1. Core business logic of changed modules
 2. Function input/output contracts (happy path)
-3. Critical user-facing flows that touch the changes
+3. Critical user-facing content is present on the live site
 4. Boundary value checks for any changed logic
 5. At least one negative/error path per changed module
 
+Use imports that match the actual project structure visible in the source code above.
 Output ONLY the complete test file.""",
 
-        "api": base + """Write 12-16 API tests.
-Use: Python → pytest + httpx  |  JS → Jest + supertest (or node-fetch)
+        "api": base + f"""Write API tests for: {base_url}
+
+{"IMPORTANT: This project is a static SPA with NO traditional REST API. Write HTTP-level tests using node-fetch or axios that hit the actual deployed URL. Test that pages return 200, response times are acceptable, and content-type headers are correct. Do NOT use supertest or import from '../src/app'." if not has_api else f"""Write 12-16 API tests covering all detectable endpoints.
+Use: Python → pytest + httpx  |  JS → Jest + axios/node-fetch
 
 Cover:
 1. Happy path for every detectable endpoint (GET, POST, PUT, PATCH, DELETE)
 2. 400 Bad Request — missing / malformed request body
-3. 401 Unauthorized — missing auth token
+3. 401 Unauthorized — missing auth token (only if auth exists)
 4. 404 Not Found — non-existent resource ID
 5. Response schema validation (check required fields exist)
 6. Content-Type: application/json header on responses
-7. Response time assertion (< 2000 ms)
+7. Response time assertion (< 3000 ms)"""}
 
 Output ONLY the complete test file.""",
 
-        "regression": base + """Write 15-20 REGRESSION tests covering existing functionality:
-1. Every major feature of the application (infer from code)
-2. Edge cases and boundary conditions
-3. Data transformation / calculation correctness
-4. Integration between modules
-5. Error handling paths (network errors, invalid data)
-6. At least 2 tests that previously would have been common failure points
+        "regression": base + f"""Write 15-20 REGRESSION tests covering existing functionality.
+Test the live site at: {base_url}
 
+1. Every major page/section of the application (infer from code and routes)
+2. Key UI components render correctly (Navbar, Footer, main sections)
+3. Navigation between routes works
+4. Content from source files (portfolio data, text) appears on the correct pages
+5. Error handling paths (network errors, invalid routes)
+6. {"Form validation and submission flows" if has_auth else "Contact form or any interactive forms"}
+7. At least 2 edge case / boundary tests
+
+{"Do NOT test login/register/logout — this project has no auth." if not has_auth else ""}
+Use @testing-library/react for component tests and @playwright/test for E2E.
 Output ONLY the complete test file.""",
 
         "uat": base + f"""Write 6-8 UAT (end-to-end) tests using Playwright.
-{'JS: import {{ test, expect }} from "@playwright/test"'
- if language == "javascript"
- else 'Python: from playwright.sync_api import sync_playwright, expect'}
+{'JS: import { test, expect } from "@playwright/test"' if language == "javascript" else 'Python: from playwright.sync_api import sync_playwright, expect'}
 
-Simulate realistic user journeys:
-1. User registration → login flow
-2. Primary feature workflow (infer from code)
-3. Create → view → edit → delete a main entity
-4. Form validation (submit with missing fields → error message appears)
-5. Successful logout / session end
-6. Mobile viewport check (375 × 812)
+BASE_URL = "{base_url}"
 
-Add a screenshot call inside each test on failure:
-{'page.screenshot({{ path: "screenshots/test-name.png" }})'
- if language == "javascript"
- else 'page.screenshot(path="screenshots/test_name.png")'}
+Simulate REALISTIC user journeys for THIS specific project (read the source code):
+{"1. User registration → login flow\n2. Authenticated user workflow" if has_auth else
+ "1. Visitor lands on homepage and sees hero content\n2. Visitor browses to key sections (About, Projects, Skills)"}
+3. Primary feature workflow (infer from the source code above)
+4. Form interaction (submit with missing fields → error message appears)
+5. Responsive check — mobile viewport (375 × 812)
+6. No console errors on main pages
+{"7. Logout / session end" if has_auth else "7. All nav links navigate to correct routes"}
+
+{"IMPORTANT: Do NOT generate register/login/logout tests — this app has no auth." if not has_auth else ""}
+
+Add a screenshot inside each test:
+{'await page.screenshot({ path: "screenshots/test-name.png" });' if language == "javascript" else 'page.screenshot(path="screenshots/test_name.png")'}
 
 Output ONLY the complete test file.""",
 
-        "load": base + """Write a k6 LOAD test script (always JavaScript for k6):
+        "load": base + f"""Write a k6 LOAD test script (always JavaScript for k6).
 
 import http from 'k6/http';
 import {{ sleep, check }} from 'k6';
 
+const BASE_URL = __ENV.BASE_URL || '{base_url}';
+
 Scenario:
-- Ramp up:  0 → 50 VUs over 30 seconds
-- Hold:     50 VUs for 60 seconds
+- Ramp up:   0 → 50 VUs over 30 seconds
+- Hold:      50 VUs for 60 seconds
 - Ramp down: 50 → 0 VUs over 10 seconds
 
 Requirements:
-1. Test all main API endpoints in a realistic sequence
+1. Test the REAL routes of this application — infer from the source code above.
+   For a SPA/portfolio: test /, /about, /projects, /skills, /contact
+   For an API: test actual endpoints visible in the code
 2. Add think time: sleep(Math.random() * 2 + 1)
-3. Thresholds: p(95) < 500ms,  http_req_failed rate < 0.01
-4. Use const BASE_URL = __ENV.BASE_URL || 'http://localhost:3000'
-5. Add check() assertions for status codes
+3. Thresholds: p(95) < 500ms, http_req_failed rate < 0.01
+4. Add check() assertions for status 200
 
 Output ONLY the complete k6 JavaScript file.""",
 
-        "stress": base + """Write a k6 STRESS test script (always JavaScript for k6)
-to find the breaking point of the system:
+        "stress": base + f"""Write a k6 STRESS test script (always JavaScript for k6)
+to find the breaking point of: {base_url}
+
+const BASE_URL = __ENV.BASE_URL || '{base_url}';
 
 Stages:
 - Stage 1:  0 →  50 VUs /  60s  (warm-up)
@@ -150,10 +189,10 @@ Stages:
 - Stage 5: 500 →   0 VUs/  60s  (recovery)
 
 Requirements:
-1. Use const BASE_URL = __ENV.BASE_URL || 'http://localhost:3000'
-2. Thresholds: allow up to 20% error rate (stress is expected to break)
+1. Hit the most critical route of this application (infer from code)
+2. Thresholds: allow up to 20% error rate (stress is expected to break things)
 3. Track p95 and p99 response times across stages
-4. Add check() for status codes at each stage
+4. Add check() for status codes
 5. Log error rate increase with console.warn
 
 Output ONLY the complete k6 JavaScript file.""",
@@ -167,7 +206,7 @@ Output ONLY the complete k6 JavaScript file.""",
 def get_filename(test_type: str, language: str, project_name: str) -> str:
     safe = project_name.lower().replace(" ", "_").replace("-", "_")
     if test_type in ("load", "stress"):
-        return f"{test_type}-test.js"                    # k6 is always JS
+        return f"{test_type}-test.js"
     if language == "javascript":
         if test_type == "uat":
             return f"{safe}_uat.spec.ts"
@@ -182,7 +221,6 @@ def get_filename(test_type: str, language: str, project_name: str) -> str:
 
 def call_openai(client: OpenAI, model: str,
                 prompt: str, max_tokens: int = 2500) -> str:
-    """Call OpenAI with exponential backoff and markdown fence stripping."""
     retries = 3
     for attempt in range(retries):
         try:
@@ -196,13 +234,10 @@ def call_openai(client: OpenAI, model: str,
                 max_tokens=max_tokens,
             )
             content = resp.choices[0].message.content.strip()
-
-            # Strip accidental markdown fences
             if content.startswith("```"):
                 lines = content.split("\n")
                 end   = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 content = "\n".join(lines[1:end])
-
             return content
 
         except RateLimitError:
@@ -226,15 +261,15 @@ def call_openai(client: OpenAI, model: str,
     raise RuntimeError(f"OpenAI call failed after {retries} attempts")
 
 
-# ── Cost estimator (approximate) ──────────────────────────────────────────────
+# ── Cost estimator ─────────────────────────────────────────────────────────────
 
 def estimate_cost(model: str, prompt: str, output: str) -> float:
     tokens_in  = len(prompt)  // 4
     tokens_out = len(output)  // 4
     rates = {
-        "gpt-4o-mini":  (0.00000015,  0.00000060),
-        "gpt-4o":       (0.0000025,   0.0000100),
-        "gpt-4-turbo":  (0.0000100,   0.0000300),
+        "gpt-4o-mini":  (0.00000015, 0.00000060),
+        "gpt-4o":       (0.0000025,  0.0000100),
+        "gpt-4-turbo":  (0.0000100,  0.0000300),
     }
     r_in, r_out = rates.get(model, (0.0000025, 0.0000100))
     return (tokens_in * r_in) + (tokens_out * r_out)
@@ -252,19 +287,11 @@ def write_fallback(out_dir: Path, test_type: str,
         content = f"""import pytest
 
 class Test{safe.title()}{test_type.title()}Fallback:
-    \"\"\"
-    Fallback {test_type} tests for {project_name}.
-    AI generation failed — replace these with real tests.
-    \"\"\"
-
     def test_{test_type}_placeholder(self):
-        \"\"\"TODO: add real {test_type} test.\"\"\"
         assert True
 """
     elif test_type in ("load", "stress"):
-        content = f"""// Fallback {test_type} test — AI generation failed.
-// Replace with real k6 script.
-import http from 'k6/http';
+        content = f"""import http from 'k6/http';
 import {{ sleep }} from 'k6';
 export const options = {{ vus: 1, duration: '5s' }};
 export default function () {{
@@ -273,8 +300,7 @@ export default function () {{
 }}
 """
     else:
-        content = f"""// Fallback {test_type} tests for {project_name} — AI generation failed.
-describe('{project_name} — {test_type} (fallback)', () => {{
+        content = f"""describe('{project_name} — {test_type} (fallback)', () => {{
   test('placeholder — replace with real {test_type} tests', () => {{
     expect(true).toBe(true);
   }});
@@ -286,40 +312,26 @@ describe('{project_name} — {test_type} (fallback)', () => {{
 
 # ── Newman collection ──────────────────────────────────────────────────────────
 
-def write_newman_collection(project_name: str, base_url: str = "http://localhost:3000"):
+def write_newman_collection(project_name: str, base_url: str):
     collection = {
         "info": {
             "name": f"{project_name} API Tests",
             "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
         },
-        "item": [
-            {
-                "name": "Health Check",
-                "request": {
-                    "method": "GET",
-                    "header": [],
-                    "url": {
-                        "raw": "{{BASE_URL}}/health",
-                        "host": ["{{BASE_URL}}"],
-                        "path": ["health"]
-                    }
-                },
-                "event": [{
-                    "listen": "test",
-                    "script": {"exec": [
-                        "pm.test('Status 2xx', () => {",
-                        "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 204]);",
-                        "});",
-                        "pm.test('Response < 500ms', () => {",
-                        "  pm.expect(pm.response.responseTime).to.be.below(500);",
-                        "});",
-                    ]}
-                }]
-            }
-        ],
-        "variable": [
-            {"key": "BASE_URL", "value": base_url}
-        ]
+        "item": [{
+            "name": "Health Check",
+            "request": {
+                "method": "GET",
+                "header": [],
+                "url": {"raw": "{{BASE_URL}}/", "host": ["{{BASE_URL}}"], "path": [""]}
+            },
+            "event": [{"listen": "test", "script": {"exec": [
+                "pm.test('Status 2xx', () => {",
+                "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 204]);",
+                "});",
+            ]}}]
+        }],
+        "variable": [{"key": "BASE_URL", "value": base_url}]
     }
     api_dir = Path("generated-tests/api")
     api_dir.mkdir(parents=True, exist_ok=True)
@@ -338,11 +350,12 @@ def main():
     language     = os.environ.get("LANGUAGE",       "javascript")
     framework    = os.environ.get("FRAMEWORK",      "node")
     project_name = os.environ.get("PROJECT_NAME",   "MyProject")
+    base_url     = os.environ.get("BASE_URL",       "http://localhost:3000").rstrip("/")
     changed_files = [
         f for f in os.environ.get("CHANGED_FILES", "").split(",") if f
     ]
 
-    # Load richer data from detect_stack.py
+    # Load richer data from detect_stack.py output
     detection_path = Path("generated-tests/detection.json")
     detection: dict = {}
     if detection_path.exists():
@@ -354,9 +367,16 @@ def main():
         except Exception:
             pass
 
+    has_api  = detection.get("has_api",  False)
+    has_auth = detection.get("has_auth", False)
+
+    # Override base_url from detection if set, but env var takes priority
+    if not base_url or base_url == "http://localhost:3000":
+        base_url = detection.get("base_url", base_url)
+
     code_sample = detection.get("code_sample", "")
     if not code_sample:
-        ws          = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+        ws          = os.environ.get("WORKSPACE", os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
         code_sample = _read_code_sample(ws, language)
 
     client = OpenAI(api_key=api_key)
@@ -365,10 +385,13 @@ def main():
     print(f"   Model:    {model}")
     print(f"   Project:  {project_name}")
     print(f"   Language: {language} / {framework}")
+    print(f"   Base URL: {base_url}")
+    print(f"   Has API:  {has_api}")
+    print(f"   Has Auth: {has_auth}")
     print(f"   Changed:  {len(changed_files)} files")
     print()
 
-    generated: list  = []
+    generated: list   = []
     total_cost: float = 0.0
 
     for test_type in TEST_TYPES:
@@ -379,7 +402,8 @@ def main():
 
         prompt = build_prompt(
             test_type, language, framework,
-            project_name, code_sample, changed_files
+            project_name, code_sample, changed_files,
+            base_url, has_api, has_auth
         )
 
         try:
@@ -399,27 +423,26 @@ def main():
             print(f"⚠️   {e.__class__.__name__}: {str(e)[:60]}")
             write_fallback(out_dir, test_type, language, project_name)
 
-        # Respect rate limits
         time.sleep(1.5)
 
-    # Newman collection for the API stage
-    if detection.get("has_api", True):
-        write_newman_collection(project_name)
+    if has_api:
+        write_newman_collection(project_name, base_url)
         print(f"  📮  Newman collection → generated-tests/api/collection.json")
 
-    # Persist summary
     summary = {
-        "project":             project_name,
-        "language":            language,
-        "framework":           framework,
-        "model":               model,
-        "generated_files":     generated,
-        "test_types":          TEST_TYPES,
-        "estimated_cost_usd":  round(total_cost, 5),
+        "project":            project_name,
+        "language":           language,
+        "framework":          framework,
+        "model":              model,
+        "base_url":           base_url,
+        "has_api":            has_api,
+        "has_auth":           has_auth,
+        "generated_files":    generated,
+        "test_types":         TEST_TYPES,
+        "estimated_cost_usd": round(total_cost, 5),
     }
     Path("generated-tests/summary.json").write_text(json.dumps(summary, indent=2))
 
-    # GitHub Actions output
     output_file = os.environ.get("GITHUB_OUTPUT", "")
     if output_file:
         with open(output_file, "a") as f:

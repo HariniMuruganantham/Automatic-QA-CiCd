@@ -66,6 +66,7 @@ jobs:
         run: python $GITHUB_WORKSPACE/qa-platform/scripts/detect_stack.py
         env:
           WORKSPACE: ${{ github.workspace }}/project
+          BASE_URL:  ${{ inputs.base-url }}
 
       - name: Generate tests via OpenAI
         id: generate
@@ -77,6 +78,7 @@ jobs:
           FRAMEWORK:      ${{ steps.detect.outputs.framework }}
           CHANGED_FILES:  ${{ steps.detect.outputs.changed-files }}
           PROJECT_NAME:   ${{ inputs.project-name }}
+          BASE_URL:       ${{ inputs.base-url }}
           WORKSPACE:      ${{ github.workspace }}/project
 
       - name: Upload generated tests
@@ -122,7 +124,8 @@ jobs:
       - name: Install JS deps and jest config
         if: needs.detect-and-generate.outputs.language == 'javascript'
         run: |
-          if [ -f package.json ]; then npm ci 2>/dev/null || npm install; fi
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then cd "$BASE" && npm ci 2>/dev/null || npm install; fi
           npm install -g jest ts-jest typescript @types/jest
           if [ ! -f jest.config.js ] && [ ! -f jest.config.ts ] && [ ! -f jest.config.json ]; then
             printf '%s\n' \
@@ -138,18 +141,18 @@ jobs:
       - name: Install Python deps
         if: needs.detect-and-generate.outputs.language == 'python'
         run: |
-          pip install --break-system-packages \
-            pytest pytest-json-report requests httpx \
-            $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "")
+          BASE="${{ github.workspace }}/project"
+          pip install --break-system-packages             pytest pytest-json-report requests httpx             $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "")
 
       - name: Start application
         run: |
-          if [ -f "package.json" ]; then npm start &
-          elif [ -f "manage.py" ]; then python manage.py runserver &
-          elif [ -f "app.py" ]; then python app.py &
-          elif [ -f "main.py" ]; then python main.py &
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
+          elif [ -f "$BASE/manage.py" ]; then cd "$BASE" && python manage.py runserver &
+          elif [ -f "$BASE/app.py" ]; then cd "$BASE" && python app.py &
+          elif [ -f "$BASE/main.py" ]; then cd "$BASE" && python main.py &
           fi
-          sleep 6
+          sleep 8
 
       - name: Run smoke tests (JS)
         if: needs.detect-and-generate.outputs.language == 'javascript'
@@ -271,16 +274,15 @@ jobs:
 
       - name: Start application
         run: |
-          if [ -f "package.json" ]; then
-            npm ci 2>/dev/null || npm install
-            npm start &
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then
+            cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
           fi
-          if [ -f "app.py" ]; then
-            pip install --break-system-packages \
-              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "flask fastapi uvicorn") || true
-            python app.py &
+          if [ -f "$BASE/app.py" ]; then
+            pip install --break-system-packages               $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "flask fastapi uvicorn") || true
+            cd "$BASE" && python app.py &
           fi
-          sleep 6
+          sleep 8
 
       - name: Run Newman collection
         if: hashFiles('generated-tests/api/collection.json') != ''
@@ -345,16 +347,15 @@ jobs:
 
       - name: Start application
         run: |
-          if [ -f "package.json" ]; then
-            npm ci 2>/dev/null || npm install
-            npm start &
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then
+            cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
           fi
-          if [ -f "app.py" ]; then
-            pip install --break-system-packages \
-              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
-            python app.py &
+          if [ -f "$BASE/app.py" ]; then
+            pip install --break-system-packages               $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "") || true
+            cd "$BASE" && python app.py &
           fi
-          sleep 6
+          sleep 8
 
       - name: Run regression with Playwright
         run: npx playwright test generated-tests/regression/ --reporter=json --output=regression-pw-results/ || true
@@ -404,14 +405,13 @@ jobs:
 
       - name: Start application
         run: |
-          if [ -f "package.json" ]; then
-            npm ci 2>/dev/null || npm install
-            npm start &
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then
+            cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
           fi
-          if [ -f "app.py" ]; then
-            pip install --break-system-packages \
-              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
-            python app.py &
+          if [ -f "$BASE/app.py" ]; then
+            pip install --break-system-packages               $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "") || true
+            cd "$BASE" && python app.py &
           fi
           sleep 8
 
@@ -461,14 +461,13 @@ jobs:
 
       - name: Start application
         run: |
-          if [ -f "package.json" ]; then
-            npm ci 2>/dev/null || npm install
-            npm start &
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then
+            cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
           fi
-          if [ -f "app.py" ]; then
-            pip install --break-system-packages \
-              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
-            python app.py &
+          if [ -f "$BASE/app.py" ]; then
+            pip install --break-system-packages               $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "") || true
+            cd "$BASE" && python app.py &
           fi
           sleep 8
 
@@ -523,14 +522,13 @@ jobs:
 
       - name: Start application
         run: |
-          if [ -f "package.json" ]; then
-            npm ci 2>/dev/null || npm install
-            npm start &
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then
+            cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
           fi
-          if [ -f "app.py" ]; then
-            pip install --break-system-packages \
-              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
-            python app.py &
+          if [ -f "$BASE/app.py" ]; then
+            pip install --break-system-packages               $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "") || true
+            cd "$BASE" && python app.py &
           fi
           sleep 8
 
