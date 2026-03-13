@@ -22,12 +22,42 @@ def set_output(name: str, value: str):
     print(f"  → {name}={value}")
 
 
+SKIP_DIRS = {"node_modules", ".git", "venv", "__pycache__",
+             "dist", "build", ".next", ".nuxt", "coverage"}
+
+
+def count_source_files(workspace: str, extensions: list) -> int:
+    """Count source files with given extensions, skipping noise dirs."""
+    p = Path(workspace)
+    count = 0
+    for ext in extensions:
+        for f in p.rglob(f"*{ext}"):
+            if not any(s in f.parts for s in SKIP_DIRS):
+                count += 1
+    return count
+
+
 def detect_language(workspace: str) -> tuple:
-    """Return (language, framework) by inspecting root files."""
+    """Return (language, framework) by inspecting root files + source file counts."""
     p = Path(workspace)
 
+    has_package_json   = (p / "package.json").exists()
+    has_requirements   = (p / "requirements.txt").exists()
+    has_pyproject      = (p / "pyproject.toml").exists()
+    has_python_marker  = has_requirements or has_pyproject
+
+    # If BOTH package.json and Python markers exist, count source files to decide
+    if has_package_json and has_python_marker:
+        py_count = count_source_files(workspace, [".py"])
+        js_count = count_source_files(workspace, [".js", ".ts", ".jsx", ".tsx"])
+        print(f"   ⚖️  Both package.json and Python markers found — "
+              f"py={py_count} js={js_count}")
+        use_python = py_count > js_count
+    else:
+        use_python = has_python_marker and not has_package_json
+
     # ── JavaScript / TypeScript ──────────────────────────────────
-    if (p / "package.json").exists():
+    if has_package_json and not use_python:
         try:
             pkg = json.loads((p / "package.json").read_text())
         except Exception:
@@ -42,7 +72,7 @@ def detect_language(workspace: str) -> tuple:
         return "javascript", "node"
 
     # ── Python ───────────────────────────────────────────────────
-    if (p / "requirements.txt").exists() or (p / "pyproject.toml").exists():
+    if has_python_marker or use_python:
         req_path = p / "requirements.txt"
         reqs = req_path.read_text().lower() if req_path.exists() else ""
         if "django"  in reqs: return "python", "django"
@@ -61,7 +91,11 @@ def detect_language(workspace: str) -> tuple:
     # ── Ruby ─────────────────────────────────────────────────────
     if (p / "Gemfile").exists():         return "ruby", "rails"
 
-    # Default
+    # Default — last resort, count files to make best guess
+    py_count = count_source_files(workspace, [".py"])
+    js_count = count_source_files(workspace, [".js", ".ts", ".jsx", ".tsx"])
+    if py_count > js_count:
+        return "python", "python"
     return "javascript", "node"
 
 
@@ -110,13 +144,11 @@ def read_code_sample(workspace: str, language: str) -> str:
         "ruby":       [".rb"],
     }
     extensions = ext_map.get(language, [".py", ".js"])
-    skip       = {"node_modules", ".git", "venv", "__pycache__",
-                  "dist", "build", ".next", ".nuxt", "coverage"}
 
     samples = []
     for ext in extensions:
         for f in sorted(p.rglob(f"*{ext}"))[:10]:
-            if any(s in f.parts for s in skip):
+            if any(s in f.parts for s in SKIP_DIRS):
                 continue
             try:
                 text = f.read_text(errors="ignore")
@@ -150,12 +182,12 @@ def main():
     # Persist for the AI generation step
     os.makedirs("generated-tests", exist_ok=True)
     detection = {
-        "language":     language,
-        "framework":    framework,
-        "has_api":      has_api,
+        "language":      language,
+        "framework":     framework,
+        "has_api":       has_api,
         "changed_files": changed_files,
-        "code_sample":  code_sample[:4000],
-        "workspace":    workspace,
+        "code_sample":   code_sample[:4000],
+        "workspace":     workspace,
     }
     with open("generated-tests/detection.json", "w") as f:
         json.dump(detection, f, indent=2)
@@ -166,7 +198,6 @@ def main():
         with open(env_file, "a") as f:
             f.write(f"DETECTED_LANGUAGE={language}\n")
             f.write(f"DETECTED_FRAMEWORK={framework}\n")
-            # Multi-line value for code sample
             f.write(f"CODE_SAMPLE<<EOF\n{code_sample[:2000]}\nEOF\n")
 
     # Write step outputs
