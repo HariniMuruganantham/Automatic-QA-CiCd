@@ -44,22 +44,10 @@ jobs:
       has-api:   ${{ steps.detect.outputs.has-api }}
 
     steps:
-      # FIX 1: Checkout the CALLING repo (the project being tested),
-      # then checkout the QA platform scripts separately.
-      - name: Checkout project repo (calling repo)
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.repository.full_name }}
-          ref: ${{ github.sha }}
           fetch-depth: 2
-          path: project
-
-      - name: Checkout QA platform (scripts)
-        uses: actions/checkout@v4
-        with:
-          repository: HariniMuruganantham/Automatic-QA-CiCd
-          ref: main
-          path: qa-platform
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -71,13 +59,13 @@ jobs:
 
       - name: 🔍 Detect stack
         id: detect
-        run: python $GITHUB_WORKSPACE/qa-platform/scripts/detect_stack.py
+        run: python $GITHUB_WORKSPACE/scripts/detect_stack.py
         env:
-          WORKSPACE: ${{ github.workspace }}/project
+          WORKSPACE: ${{ github.workspace }}
 
       - name: 🤖 Generate tests via OpenAI
         id: generate
-        run: python $GITHUB_WORKSPACE/qa-platform/scripts/ai/generate_tests.py
+        run: python $GITHUB_WORKSPACE/scripts/ai/generate_tests.py
         env:
           OPENAI_API_KEY:  ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL:    ${{ inputs.openai-model }}
@@ -85,7 +73,6 @@ jobs:
           FRAMEWORK:       ${{ steps.detect.outputs.framework }}
           CHANGED_FILES:   ${{ steps.detect.outputs.changed-files }}
           PROJECT_NAME:    ${{ inputs.project-name }}
-          WORKSPACE:       ${{ github.workspace }}/project
 
       - name: Upload generated tests
         uses: actions/upload-artifact@v4
@@ -103,19 +90,8 @@ jobs:
     needs: detect-and-generate
 
     steps:
-      - name: Checkout project repo
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.repository.full_name }}
-          ref: ${{ github.sha }}
-          path: project
-
-      - name: Checkout QA platform
-        uses: actions/checkout@v4
-        with:
-          repository: HariniMuruganantham/Automatic-QA-CiCd
-          ref: main
-          path: qa-platform
 
       - name: Download generated tests
         uses: actions/download-artifact@v4
@@ -123,8 +99,6 @@ jobs:
           name: generated-tests
           path: generated-tests/
 
-      # FIX 2: Removed "cache: npm" — no package-lock.json in QA platform repo.
-      # npm ci runs inside project/ where the lock file exists.
       - name: Setup Node 20
         if: needs.detect-and-generate.outputs.language == 'javascript'
         uses: actions/setup-node@v4
@@ -139,26 +113,26 @@ jobs:
 
       - name: Install JS dependencies
         if: needs.detect-and-generate.outputs.language == 'javascript'
-        run: npm ci
-        working-directory: project
+        # Works with or without package-lock.json — universal project support
+        run: npm ci 2>/dev/null || npm install
 
       - name: Install Python dependencies
         if: needs.detect-and-generate.outputs.language == 'python'
         run: |
           pip install --break-system-packages \
             pytest pytest-json-report requests httpx \
-            $([ -f project/requirements.txt ] && echo "-r project/requirements.txt" || echo "")
+            $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "")
 
       - name: Start application
         run: |
-          if [ -f "project/package.json" ]; then
-            cd project && npm start &
-          elif [ -f "project/manage.py" ]; then
-            cd project && python manage.py runserver &
-          elif [ -f "project/app.py" ]; then
-            cd project && python app.py &
-          elif [ -f "project/main.py" ]; then
-            cd project && python main.py &
+          if [ -f "package.json" ]; then
+            npm start &
+          elif [ -f "manage.py" ]; then
+            python manage.py runserver &
+          elif [ -f "app.py" ]; then
+            python app.py &
+          elif [ -f "main.py" ]; then
+            python main.py &
           fi
           sleep 6
 
@@ -178,7 +152,7 @@ jobs:
         run: pip install --break-system-packages --quiet || true
 
       - name: 🚦 Smoke gate check
-        run: python $GITHUB_WORKSPACE/qa-platform/scripts/smoke/check_results.py smoke-results.json
+        run: python $GITHUB_WORKSPACE/scripts/smoke/check_results.py smoke-results.json
 
       - name: Upload smoke results
         if: always()
@@ -196,19 +170,12 @@ jobs:
     needs: [detect-and-generate, smoke]
 
     steps:
-      - name: Checkout project repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.repository.full_name }}
-          ref: ${{ github.sha }}
-          path: project
-
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: generated-tests
           path: generated-tests/
 
-      # FIX 2: Removed "cache: npm"
       - uses: actions/setup-node@v4
         if: needs.detect-and-generate.outputs.language == 'javascript'
         with:
@@ -222,17 +189,16 @@ jobs:
       - name: Install & run sanity (JS)
         if: needs.detect-and-generate.outputs.language == 'javascript'
         run: |
-          npm ci
+          npm ci 2>/dev/null || npm install
           npx jest generated-tests/sanity/ \
             --json --outputFile=sanity-results.json || true
-        working-directory: project
 
       - name: Install & run sanity (Python)
         if: needs.detect-and-generate.outputs.language == 'python'
         run: |
           pip install --break-system-packages \
             pytest pytest-json-report requests httpx \
-            $([ -f project/requirements.txt ] && echo "-r project/requirements.txt" || echo "") || true
+            $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
           pytest generated-tests/sanity/ \
             --json-report --json-report-file=sanity-results.json -v || true
 
@@ -252,13 +218,7 @@ jobs:
     if: needs.detect-and-generate.outputs.has-api == 'true'
 
     steps:
-      - name: Checkout project repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.repository.full_name }}
-          ref: ${{ github.sha }}
-          path: project
-
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: generated-tests
@@ -280,13 +240,14 @@ jobs:
 
       - name: Start application
         run: |
-          if [ -f "project/package.json" ]; then
-            cd project && npm ci && npm start &
+          if [ -f "package.json" ]; then
+            npm ci 2>/dev/null || npm install
+            npm start &
           fi
-          if [ -f "project/app.py" ]; then
+          if [ -f "app.py" ]; then
             pip install --break-system-packages \
-              $([ -f project/requirements.txt ] && echo "-r project/requirements.txt" || echo "flask fastapi uvicorn") || true
-            cd project && python app.py &
+              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "flask fastapi uvicorn") || true
+            python app.py &
           fi
           sleep 6
 
@@ -318,24 +279,16 @@ jobs:
   regression:
     name: 🔁 Regression Tests
     runs-on: ubuntu-latest
-    # FIX 3: Added "smoke" to needs so needs.smoke.result is valid
     needs: [detect-and-generate, smoke, sanity, api-tests]
     if: always() && needs.smoke.result == 'success'
 
     steps:
-      - name: Checkout project repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.repository.full_name }}
-          ref: ${{ github.sha }}
-          path: project
-
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: generated-tests
           path: generated-tests/
 
-      # FIX 2: Removed "cache: npm"
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -353,13 +306,14 @@ jobs:
 
       - name: Start application
         run: |
-          if [ -f "project/package.json" ]; then
-            cd project && npm ci && npm start &
+          if [ -f "package.json" ]; then
+            npm ci 2>/dev/null || npm install
+            npm start &
           fi
-          if [ -f "project/app.py" ]; then
+          if [ -f "app.py" ]; then
             pip install --break-system-packages \
-              $([ -f project/requirements.txt ] && echo "-r project/requirements.txt" || echo "") || true
-            cd project && python app.py &
+              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
+            python app.py &
           fi
           sleep 6
 
@@ -392,13 +346,7 @@ jobs:
     needs: [detect-and-generate, smoke]
 
     steps:
-      - name: Checkout project repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.repository.full_name }}
-          ref: ${{ github.sha }}
-          path: project
-
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: generated-tests
@@ -415,13 +363,14 @@ jobs:
 
       - name: Start application
         run: |
-          if [ -f "project/package.json" ]; then
-            cd project && npm ci && npm start &
+          if [ -f "package.json" ]; then
+            npm ci 2>/dev/null || npm install
+            npm start &
           fi
-          if [ -f "project/app.py" ]; then
+          if [ -f "app.py" ]; then
             pip install --break-system-packages \
-              $([ -f project/requirements.txt ] && echo "-r project/requirements.txt" || echo "") || true
-            cd project && python app.py &
+              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
+            python app.py &
           fi
           sleep 8
 
@@ -447,13 +396,7 @@ jobs:
     if: inputs.run-load == true
 
     steps:
-      - name: Checkout project repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.repository.full_name }}
-          ref: ${{ github.sha }}
-          path: project
-
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: generated-tests
@@ -473,13 +416,14 @@ jobs:
 
       - name: Start application
         run: |
-          if [ -f "project/package.json" ]; then
-            cd project && npm ci && npm start &
+          if [ -f "package.json" ]; then
+            npm ci 2>/dev/null || npm install
+            npm start &
           fi
-          if [ -f "project/app.py" ]; then
+          if [ -f "app.py" ]; then
             pip install --break-system-packages \
-              $([ -f project/requirements.txt ] && echo "-r project/requirements.txt" || echo "") || true
-            cd project && python app.py &
+              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
+            python app.py &
           fi
           sleep 8
 
@@ -507,13 +451,7 @@ jobs:
     if: inputs.run-stress == true
 
     steps:
-      - name: Checkout project repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.repository.full_name }}
-          ref: ${{ github.sha }}
-          path: project
-
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: generated-tests
@@ -533,13 +471,14 @@ jobs:
 
       - name: Start application
         run: |
-          if [ -f "project/package.json" ]; then
-            cd project && npm ci && npm start &
+          if [ -f "package.json" ]; then
+            npm ci 2>/dev/null || npm install
+            npm start &
           fi
-          if [ -f "project/app.py" ]; then
+          if [ -f "app.py" ]; then
             pip install --break-system-packages \
-              $([ -f project/requirements.txt ] && echo "-r project/requirements.txt" || echo "") || true
-            cd project && python app.py &
+              $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
+            python app.py &
           fi
           sleep 8
 
@@ -565,12 +504,7 @@ jobs:
     if: always()
 
     steps:
-      - name: Checkout QA platform (for report scripts)
-        uses: actions/checkout@v4
-        with:
-          repository: HariniMuruganantham/Automatic-QA-CiCd
-          ref: main
-          path: qa-platform
+      - uses: actions/checkout@v4
 
       - name: Download all test results
         uses: actions/download-artifact@v4
@@ -586,7 +520,7 @@ jobs:
 
       - name: 📊 Generate HTML report
         run: |
-          python $GITHUB_WORKSPACE/qa-platform/scripts/report/generate_report.py \
+          python $GITHUB_WORKSPACE/scripts/report/generate_report.py \
             --results-dir all-results/ \
             --project     "${{ inputs.project-name }}" \
             --commit      "${{ github.sha }}" \
@@ -627,8 +561,8 @@ jobs:
               };
             }
 
-            const emoji  = summary.failed === 0 ? '✅' : '❌';
-            const s      = summary;
+            const emoji = summary.failed === 0 ? '✅' : '❌';
+            const s     = summary;
 
             const body = `## ${emoji} QA Report — ${{ inputs.project-name }}
 
