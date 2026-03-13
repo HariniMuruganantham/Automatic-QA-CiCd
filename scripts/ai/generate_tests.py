@@ -52,6 +52,47 @@ def _build_api_prompt(base_url: str, has_api: bool) -> str:
     )
 
 
+def _build_uat_prompt(base_url: str, language: str, has_auth: bool) -> str:
+    import_line = (
+        'JS: import { test, expect } from "@playwright/test"'
+        if language == "javascript"
+        else "Python: from playwright.sync_api import sync_playwright, expect"
+    )
+    journey_1_2 = (
+        "1. User registration -> login flow\n2. Authenticated user workflow"
+        if has_auth
+        else "1. Visitor lands on homepage and sees hero content\n"
+             "2. Visitor browses to key sections (About, Projects, Skills)"
+    )
+    step_7 = "7. Logout / session end" if has_auth else "7. All nav links navigate to correct routes"
+    auth_warning = (
+        ""
+        if has_auth
+        else "\nIMPORTANT: Do NOT generate register/login/logout tests - this app has no auth.\n"
+    )
+    screenshot = (
+        'await page.screenshot({ path: "screenshots/test-name.png" });'
+        if language == "javascript"
+        else 'page.screenshot(path="screenshots/test_name.png")'
+    )
+    return (
+        "Write 6-8 UAT (end-to-end) tests using Playwright.\n"
+        + import_line + "\n\n"
+        "BASE_URL = \"" + base_url + "\"\n\n"
+        "Simulate REALISTIC user journeys for THIS specific project (read the source code):\n"
+        + journey_1_2 + "\n"
+        "3. Primary feature workflow (infer from the source code above)\n"
+        "4. Form interaction (submit with missing fields -> error message appears)\n"
+        "5. Responsive check - mobile viewport (375 x 812)\n"
+        "6. No console errors on main pages\n"
+        + step_7 + "\n"
+        + auth_warning + "\n"
+        "Add a screenshot inside each test:\n"
+        + screenshot + "\n\n"
+        "Output ONLY the complete test file."
+    )
+
+
 def build_prompt(test_type: str, language: str, framework: str,
                  project_name: str, code_sample: str,
                  changed_files: list, base_url: str,
@@ -145,26 +186,7 @@ Test the live site at: {base_url}
 Use @testing-library/react for component tests and @playwright/test for E2E.
 Output ONLY the complete test file.""",
 
-        "uat": base + f"""Write 6-8 UAT (end-to-end) tests using Playwright.
-{'JS: import { test, expect } from "@playwright/test"' if language == "javascript" else 'Python: from playwright.sync_api import sync_playwright, expect'}
-
-BASE_URL = "{base_url}"
-
-Simulate REALISTIC user journeys for THIS specific project (read the source code):
-{"1. User registration -> login flow\n2. Authenticated user workflow" if has_auth else
- "1. Visitor lands on homepage and sees hero content\n2. Visitor browses to key sections (About, Projects, Skills)"}
-3. Primary feature workflow (infer from the source code above)
-4. Form interaction (submit with missing fields -> error message appears)
-5. Responsive check - mobile viewport (375 x 812)
-6. No console errors on main pages
-{"7. Logout / session end" if has_auth else "7. All nav links navigate to correct routes"}
-
-{"IMPORTANT: Do NOT generate register/login/logout tests - this app has no auth." if not has_auth else ""}
-
-Add a screenshot inside each test:
-{'await page.screenshot({ path: "screenshots/test-name.png" });' if language == "javascript" else 'page.screenshot(path="screenshots/test_name.png")'}
-
-Output ONLY the complete test file.""",
+        "uat": base + _build_uat_prompt(base_url, language, has_auth),
 
         "load": base + f"""Write a k6 LOAD test script (always JavaScript for k6).
 
