@@ -12,19 +12,19 @@ import time
 from pathlib import Path
 from openai import OpenAI, RateLimitError, APIStatusError
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# -- Configuration -------------------------------------------------------------
 
 DEFAULT_MODEL = "gpt-4o-mini"
 TEST_TYPES    = ["smoke", "sanity", "api", "regression", "uat", "load", "stress"]
 
 SYSTEM_PROMPT = (
     "You are a senior QA automation engineer. "
-    "Output ONLY raw, runnable test code — no explanations, no markdown fences "
+    "Output ONLY raw, runnable test code - no explanations, no markdown fences "
     "(no ```), no preamble, no commentary of any kind. "
     "The output is written directly to a file and must be valid syntax."
 )
 
-# ── Prompt factory ─────────────────────────────────────────────────────────────
+# -- Prompt factory -------------------------------------------------------------
 
 def build_prompt(test_type: str, language: str, framework: str,
                  project_name: str, code_sample: str,
@@ -49,7 +49,7 @@ def build_prompt(test_type: str, language: str, framework: str,
     auth_note = (
         "This project HAS authentication (login/register/logout flows exist)."
         if has_auth else
-        "This project has NO authentication — do NOT generate login, register, "
+        "This project has NO authentication - do NOT generate login, register, "
         "logout, or session tests. There are no auth routes."
     )
     api_note = (
@@ -66,7 +66,7 @@ Language: {language} | Framework: {framework}
 Deployed at: {base_url}
 {lang_hint}
 
-Project context (READ CAREFULLY — do not contradict this):
+Project context (READ CAREFULLY - do not contradict this):
 - {auth_note}
 - {api_note}
 
@@ -83,7 +83,7 @@ Source code (for context):
         "smoke": base + f"""Write 6-8 SMOKE tests that verify the LIVE deployment at {base_url}:
 1. Root URL {base_url}/ returns 2xx
 2. At least 2-3 key page routes return non-500 responses
-3. Required environment variables exist (use process.env — only ones that realistically exist)
+3. Required environment variables exist (use process.env - only ones that realistically exist)
 4. No fatal import errors on main entry files
 
 IMPORTANT: Use fetch() or @playwright/test request fixture to hit {base_url}.
@@ -109,9 +109,9 @@ Use: Python - pytest + httpx  |  JS - Jest + axios/node-fetch
 
 Cover:
 1. Happy path for every detectable endpoint (GET, POST, PUT, PATCH, DELETE)
-2. 400 Bad Request — missing / malformed request body
-3. 401 Unauthorized — missing auth token (only if auth exists)
-4. 404 Not Found — non-existent resource ID
+2. 400 Bad Request - missing / malformed request body
+3. 401 Unauthorized - missing auth token (only if auth exists)
+4. 404 Not Found - non-existent resource ID
 5. Response schema validation (check required fields exist)
 6. Content-Type: application/json header on responses
 7. Response time assertion (< 3000 ms)"""}
@@ -129,7 +129,7 @@ Test the live site at: {base_url}
 6. {"Form validation and submission flows" if has_auth else "Contact form or any interactive forms"}
 7. At least 2 edge case / boundary tests
 
-{"Do NOT test login/register/logout — this project has no auth." if not has_auth else ""}
+{"Do NOT test login/register/logout - this project has no auth." if not has_auth else ""}
 Use @testing-library/react for component tests and @playwright/test for E2E.
 Output ONLY the complete test file.""",
 
@@ -143,11 +143,11 @@ Simulate REALISTIC user journeys for THIS specific project (read the source code
  "1. Visitor lands on homepage and sees hero content\n2. Visitor browses to key sections (About, Projects, Skills)"}
 3. Primary feature workflow (infer from the source code above)
 4. Form interaction (submit with missing fields -> error message appears)
-5. Responsive check — mobile viewport (375 x 812)
+5. Responsive check - mobile viewport (375 x 812)
 6. No console errors on main pages
 {"7. Logout / session end" if has_auth else "7. All nav links navigate to correct routes"}
 
-{"IMPORTANT: Do NOT generate register/login/logout tests — this app has no auth." if not has_auth else ""}
+{"IMPORTANT: Do NOT generate register/login/logout tests - this app has no auth." if not has_auth else ""}
 
 Add a screenshot inside each test:
 {'await page.screenshot({ path: "screenshots/test-name.png" });' if language == "javascript" else 'page.screenshot(path="screenshots/test_name.png")'}
@@ -167,7 +167,7 @@ Scenario:
 - Ramp down: 50 -> 0 VUs over 10 seconds
 
 Requirements:
-1. Test the REAL routes of this application — infer from the source code above.
+1. Test the REAL routes of this application - infer from the source code above.
    For a SPA/portfolio: test /, /about, /projects, /skills, /contact
    For an API: test actual endpoints visible in the code
 2. Add think time: sleep(Math.random() * 2 + 1)
@@ -201,7 +201,7 @@ Output ONLY the complete k6 JavaScript file.""",
     return prompts[test_type]
 
 
-# ── File naming ────────────────────────────────────────────────────────────────
+# -- File naming ----------------------------------------------------------------
 
 def get_filename(test_type: str, language: str, project_name: str) -> str:
     safe = project_name.lower().replace(" ", "_").replace("-", "_")
@@ -217,7 +217,7 @@ def get_filename(test_type: str, language: str, project_name: str) -> str:
         return f"test_{safe}_{test_type}.py"
 
 
-# ── OpenAI caller with retry + model fallback ──────────────────────────────────
+# -- OpenAI caller with retry + model fallback ----------------------------------
 
 def call_openai(client: OpenAI, model: str,
                 prompt: str, max_tokens: int = 2500) -> str:
@@ -242,7 +242,7 @@ def call_openai(client: OpenAI, model: str,
 
         except RateLimitError:
             wait = 5 * (2 ** attempt)
-            print(f"    ⏳ Rate limited — waiting {wait}s (attempt {attempt+1}/{retries})")
+            print(f"    ⏳ Rate limited - waiting {wait}s (attempt {attempt+1}/{retries})")
             time.sleep(wait)
 
         except APIStatusError as e:
@@ -261,7 +261,7 @@ def call_openai(client: OpenAI, model: str,
     raise RuntimeError(f"OpenAI call failed after {retries} attempts")
 
 
-# ── Cost estimator ─────────────────────────────────────────────────────────────
+# -- Cost estimator -------------------------------------------------------------
 
 def estimate_cost(model: str, prompt: str, output: str) -> float:
     tokens_in  = len(prompt)  // 4
@@ -275,7 +275,7 @@ def estimate_cost(model: str, prompt: str, output: str) -> float:
     return (tokens_in * r_in) + (tokens_out * r_out)
 
 
-# ── Fallback writer ────────────────────────────────────────────────────────────
+# -- Fallback writer ------------------------------------------------------------
 
 def write_fallback(out_dir: Path, test_type: str,
                    language: str, project_name: str):
@@ -300,8 +300,8 @@ export default function () {{
 }}
 """
     else:
-        content = f"""describe('{project_name} — {test_type} (fallback)', () => {{
-  test('placeholder — replace with real {test_type} tests', () => {{
+        content = f"""describe('{project_name} - {test_type} (fallback)', () => {{
+  test('placeholder - replace with real {test_type} tests', () => {{
     expect(true).toBe(true);
   }});
 }});
@@ -310,7 +310,7 @@ export default function () {{
     print(f"      fallback -> {filepath.name}")
 
 
-# ── Newman collection ──────────────────────────────────────────────────────────
+# -- Newman collection ----------------------------------------------------------
 
 def write_newman_collection(project_name: str, base_url: str):
     collection = {
@@ -338,7 +338,7 @@ def write_newman_collection(project_name: str, base_url: str):
     (api_dir / "collection.json").write_text(json.dumps(collection, indent=2))
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# -- Main -----------------------------------------------------------------------
 
 def main():
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
