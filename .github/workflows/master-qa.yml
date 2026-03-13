@@ -41,9 +41,18 @@ jobs:
       has-api:   ${{ steps.detect.outputs.has-api }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout project repo
+        uses: actions/checkout@v4
         with:
           fetch-depth: 2
+          path: project
+
+      - name: Checkout QA platform scripts
+        uses: actions/checkout@v4
+        with:
+          repository: HariniMuruganantham/Automatic-QA-CiCd
+          ref: main
+          path: qa-platform
 
       - uses: actions/setup-python@v5
         with:
@@ -54,13 +63,13 @@ jobs:
 
       - name: Detect stack
         id: detect
-        run: python $GITHUB_WORKSPACE/scripts/detect_stack.py
+        run: python $GITHUB_WORKSPACE/qa-platform/scripts/detect_stack.py
         env:
-          WORKSPACE: ${{ github.workspace }}
+          WORKSPACE: ${{ github.workspace }}/project
 
       - name: Generate tests via OpenAI
         id: generate
-        run: python $GITHUB_WORKSPACE/scripts/ai/generate_tests.py
+        run: python $GITHUB_WORKSPACE/qa-platform/scripts/ai/generate_tests.py
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL:   ${{ inputs.openai-model }}
@@ -68,6 +77,7 @@ jobs:
           FRAMEWORK:      ${{ steps.detect.outputs.framework }}
           CHANGED_FILES:  ${{ steps.detect.outputs.changed-files }}
           PROJECT_NAME:   ${{ inputs.project-name }}
+          WORKSPACE:      ${{ github.workspace }}/project
 
       - name: Upload generated tests
         uses: actions/upload-artifact@v4
@@ -82,7 +92,17 @@ jobs:
     needs: detect-and-generate
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout project repo
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      - name: Checkout QA platform scripts
+        uses: actions/checkout@v4
+        with:
+          repository: HariniMuruganantham/Automatic-QA-CiCd
+          ref: main
+          path: qa-platform
 
       - uses: actions/download-artifact@v4
         with:
@@ -140,7 +160,7 @@ jobs:
         run: pytest generated-tests/smoke/ --json-report --json-report-file=smoke-results.json -v || true
 
       - name: Smoke gate check
-        run: python $GITHUB_WORKSPACE/scripts/smoke/check_results.py smoke-results.json
+        run: python $GITHUB_WORKSPACE/qa-platform/scripts/smoke/check_results.py smoke-results.json
 
       - name: Upload smoke results
         if: always()
@@ -155,7 +175,17 @@ jobs:
     needs: [detect-and-generate, smoke]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout project repo
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      - name: Checkout QA platform scripts
+        uses: actions/checkout@v4
+        with:
+          repository: HariniMuruganantham/Automatic-QA-CiCd
+          ref: main
+          path: qa-platform
 
       - uses: actions/download-artifact@v4
         with:
@@ -209,7 +239,17 @@ jobs:
     if: needs.detect-and-generate.outputs.has-api == 'true'
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout project repo
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      - name: Checkout QA platform scripts
+        uses: actions/checkout@v4
+        with:
+          repository: HariniMuruganantham/Automatic-QA-CiCd
+          ref: main
+          path: qa-platform
 
       - uses: actions/download-artifact@v4
         with:
@@ -271,7 +311,17 @@ jobs:
     if: always() && needs.smoke.result == 'success'
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout project repo
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      - name: Checkout QA platform scripts
+        uses: actions/checkout@v4
+        with:
+          repository: HariniMuruganantham/Automatic-QA-CiCd
+          ref: main
+          path: qa-platform
 
       - uses: actions/download-artifact@v4
         with:
@@ -326,7 +376,17 @@ jobs:
     needs: [detect-and-generate, smoke]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout project repo
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      - name: Checkout QA platform scripts
+        uses: actions/checkout@v4
+        with:
+          repository: HariniMuruganantham/Automatic-QA-CiCd
+          ref: main
+          path: qa-platform
 
       - uses: actions/download-artifact@v4
         with:
@@ -371,7 +431,17 @@ jobs:
     if: inputs.run-load == true
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout project repo
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      - name: Checkout QA platform scripts
+        uses: actions/checkout@v4
+        with:
+          repository: HariniMuruganantham/Automatic-QA-CiCd
+          ref: main
+          path: qa-platform
 
       - uses: actions/download-artifact@v4
         with:
@@ -423,7 +493,17 @@ jobs:
     if: inputs.run-stress == true
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout project repo
+        uses: actions/checkout@v4
+        with:
+          path: project
+
+      - name: Checkout QA platform scripts
+        uses: actions/checkout@v4
+        with:
+          repository: HariniMuruganantham/Automatic-QA-CiCd
+          ref: main
+          path: qa-platform
 
       - uses: actions/download-artifact@v4
         with:
@@ -473,7 +553,12 @@ jobs:
     if: always()
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout QA platform scripts
+        uses: actions/checkout@v4
+        with:
+          repository: HariniMuruganantham/Automatic-QA-CiCd
+          ref: main
+          path: qa-platform
 
       - uses: actions/download-artifact@v4
         with:
@@ -488,7 +573,7 @@ jobs:
 
       - name: Generate HTML report
         run: |
-          python $GITHUB_WORKSPACE/scripts/report/generate_report.py \
+          python $GITHUB_WORKSPACE/qa-platform/scripts/report/generate_report.py \
             --results-dir all-results/ \
             --project "${{ inputs.project-name }}" \
             --commit "${{ github.sha }}" \
