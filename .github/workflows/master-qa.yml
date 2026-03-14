@@ -121,20 +121,38 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install JS deps and setup Jest
+      - name: Install JS deps and jest config
         if: needs.detect-and-generate.outputs.language == 'javascript'
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/setup_jest.sh "${{ github.workspace }}/project"
+        run: |
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then cd "$BASE" && npm ci 2>/dev/null || npm install; fi
+          npm install -g jest ts-jest typescript @types/jest
+          if [ ! -f jest.config.js ] && [ ! -f jest.config.ts ] && [ ! -f jest.config.json ]; then
+            printf '%s\n' \
+              'module.exports = {' \
+              '  testEnvironment: "node",' \
+              '  transform: { "^.+\\.tsx?$": ["ts-jest", { tsconfig: { strict: false } }] },' \
+              '  testMatch: ["**/*.test.ts","**/*.test.js","**/*.spec.ts","**/*.spec.js"],' \
+              '  moduleFileExtensions: ["ts","tsx","js","jsx","json"],' \
+              '};' > jest.config.js
+            echo "Wrote jest.config.js"
+          fi
 
       - name: Install Python deps
         if: needs.detect-and-generate.outputs.language == 'python'
         run: |
           BASE="${{ github.workspace }}/project"
-          pip install --break-system-packages \
-            pytest pytest-json-report requests httpx \
-            $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "")
+          pip install --break-system-packages             pytest pytest-json-report requests httpx             $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "")
 
       - name: Start application
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/start_app.sh "${{ github.workspace }}/project" "${{ inputs.base-url }}"
+        run: |
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
+          elif [ -f "$BASE/manage.py" ]; then cd "$BASE" && python manage.py runserver &
+          elif [ -f "$BASE/app.py" ]; then cd "$BASE" && python app.py &
+          elif [ -f "$BASE/main.py" ]; then cd "$BASE" && python main.py &
+          fi
+          sleep 8
 
       - name: Install Playwright for smoke
         if: needs.detect-and-generate.outputs.language == 'javascript'
@@ -145,10 +163,15 @@ jobs:
       - name: Run smoke tests (JS)
         if: needs.detect-and-generate.outputs.language == 'javascript'
         run: |
-          npx playwright test generated-tests/smoke/ \
-            --reporter=json \
-            --config=/dev/null \
-            2>/dev/null | tee smoke-pw.json || true
+          printf '%s\n' \
+            "import { defineConfig } from '@playwright/test';" \
+            "export default defineConfig({" \
+            "  testDir: './generated-tests/smoke'," \
+            "  timeout: 15000," \
+            "  use: { headless: true }," \
+            "  reporter: [['json', { outputFile: 'smoke-pw.json' }]]," \
+            "});" > /tmp/pw-smoke.config.ts
+          npx playwright test --config=/tmp/pw-smoke.config.ts || true
           python3 $GITHUB_WORKSPACE/qa-platform/scripts/smoke/pw_to_jest.py smoke-pw.json smoke-results.json
 
       - name: Run smoke tests (Python)
@@ -198,28 +221,29 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install JS deps and setup Jest
+      - name: Install JS deps and run sanity
         if: needs.detect-and-generate.outputs.language == 'javascript'
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/setup_jest.sh "${{ github.workspace }}/project"
+        run: |
+          if [ -f package.json ]; then npm ci 2>/dev/null || npm install; fi
+          npm install -g jest ts-jest typescript @types/jest
+          if [ ! -f jest.config.js ] && [ ! -f jest.config.ts ] && [ ! -f jest.config.json ]; then
+            printf '%s\n' \
+              'module.exports = {' \
+              '  testEnvironment: "node",' \
+              '  transform: { "^.+\\.tsx?$": ["ts-jest", { tsconfig: { strict: false } }] },' \
+              '  testMatch: ["**/*.test.ts","**/*.test.js","**/*.spec.ts","**/*.spec.js"],' \
+              '  moduleFileExtensions: ["ts","tsx","js","jsx","json"],' \
+              '};' > jest.config.js
+          fi
+          npx jest generated-tests/sanity/ --json --outputFile=sanity-results.json || true
 
-      - name: Install Python deps
+      - name: Install Python deps and run sanity
         if: needs.detect-and-generate.outputs.language == 'python'
         run: |
-          BASE="${{ github.workspace }}/project"
           pip install --break-system-packages \
             pytest pytest-json-report requests httpx \
-            $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "") || true
-
-      - name: Start application
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/start_app.sh "${{ github.workspace }}/project" "${{ inputs.base-url }}"
-
-      - name: Run sanity tests (JS)
-        if: needs.detect-and-generate.outputs.language == 'javascript'
-        run: npx jest generated-tests/sanity/ --json --outputFile=sanity-results.json || true
-
-      - name: Run sanity tests (Python)
-        if: needs.detect-and-generate.outputs.language == 'python'
-        run: pytest generated-tests/sanity/ --json-report --json-report-file=sanity-results.json -v || true
+            $([ -f requirements.txt ] && echo "-r requirements.txt" || echo "") || true
+          pytest generated-tests/sanity/ --json-report --json-report-file=sanity-results.json -v || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -265,7 +289,16 @@ jobs:
           pip install --break-system-packages httpx pytest pytest-json-report requests
 
       - name: Start application
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/start_app.sh "${{ github.workspace }}/project" "${{ inputs.base-url }}"
+        run: |
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then
+            cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
+          fi
+          if [ -f "$BASE/app.py" ]; then
+            pip install --break-system-packages               $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "flask fastapi uvicorn") || true
+            cd "$BASE" && python app.py &
+          fi
+          sleep 8
 
       - name: Run Newman collection
         if: hashFiles('generated-tests/api/collection.json') != ''
@@ -331,36 +364,32 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install JS deps and setup Jest
-        if: needs.detect-and-generate.outputs.language == 'javascript'
+      - name: Install Jest and Playwright for regression
         run: |
-          bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/setup_jest.sh "${{ github.workspace }}/project"
-          npm install -g @playwright/test
+          npm install -g jest ts-jest typescript @types/jest @playwright/test
           npx playwright install --with-deps chromium
-
-      - name: Install Python deps
-        if: needs.detect-and-generate.outputs.language == 'python'
-        run: |
           pip install --break-system-packages \
             pytest playwright pytest-playwright pytest-json-report
-          python -m playwright install --with-deps chromium
+          if [ ! -f jest.config.js ]; then
+            printf 'module.exports = {\n  testEnvironment: "node",\n  transform: { "^.+\\.tsx?$": ["ts-jest", { tsconfig: { strict: false } }] },\n};\n' > jest.config.js
+          fi
 
-      - name: Start application
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/start_app.sh "${{ github.workspace }}/project" "${{ inputs.base-url }}"
-
-      - name: Run regression tests (JS)
+      - name: Run regression tests (JS - Jest for .test.ts)
         if: needs.detect-and-generate.outputs.language == 'javascript'
-        run: npx jest generated-tests/regression/ --json --outputFile=regression-results.json || true
+        run: |
+          npx jest generated-tests/regression/ --json --outputFile=regression-py-results.json || true
 
-      - name: Run regression tests (Python)
+      - name: Run regression tests (Python - pytest)
         if: needs.detect-and-generate.outputs.language == 'python'
-        run: pytest generated-tests/regression/ --json-report --json-report-file=regression-results.json -v || true
+        run: pytest generated-tests/regression/ --json-report --json-report-file=regression-py-results.json -v || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: regression-results
-          path: regression-results.json
+          path: |
+            regression-pw-results/
+            regression-py-results.json
 
   uat:
     name: "UAT Tests"
@@ -386,38 +415,28 @@ jobs:
           path: generated-tests/
 
       - uses: actions/setup-node@v4
-        if: needs.detect-and-generate.outputs.language == 'javascript'
         with:
           node-version: 20
 
-      - uses: actions/setup-python@v5
-        if: needs.detect-and-generate.outputs.language == 'python'
-        with:
-          python-version: "3.11"
-
-      - name: Install Playwright (JS)
-        if: needs.detect-and-generate.outputs.language == 'javascript'
+      - name: Install Playwright
         run: |
           npm install -g @playwright/test
           npx playwright install --with-deps chromium
 
-      - name: Install Playwright (Python)
-        if: needs.detect-and-generate.outputs.language == 'python'
-        run: |
-          pip install --break-system-packages \
-            pytest pytest-playwright pytest-json-report
-          python -m playwright install --with-deps chromium
-
       - name: Start application
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/start_app.sh "${{ github.workspace }}/project" "${{ inputs.base-url }}"
+        run: |
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then
+            cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
+          fi
+          if [ -f "$BASE/app.py" ]; then
+            pip install --break-system-packages               $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "") || true
+            cd "$BASE" && python app.py &
+          fi
+          sleep 8
 
-      - name: Run UAT tests (JS)
-        if: needs.detect-and-generate.outputs.language == 'javascript'
+      - name: Run UAT with Playwright
         run: npx playwright test generated-tests/uat/ --reporter=json --output=uat-results/ || true
-
-      - name: Run UAT tests (Python)
-        if: needs.detect-and-generate.outputs.language == 'python'
-        run: pytest generated-tests/uat/ --json-report --json-report-file=uat-results/results.json -v || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -450,10 +469,27 @@ jobs:
           path: generated-tests/
 
       - name: Install k6
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/install_k6.sh
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update -qq && sudo apt-get install k6 -y
 
       - name: Start application
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/start_app.sh "${{ github.workspace }}/project" "${{ inputs.base-url }}"
+        run: |
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then
+            cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
+          fi
+          if [ -f "$BASE/app.py" ]; then
+            pip install --break-system-packages               $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "") || true
+            cd "$BASE" && python app.py &
+          fi
+          sleep 8
 
       - name: Run load test
         run: |
@@ -494,10 +530,27 @@ jobs:
           path: generated-tests/
 
       - name: Install k6
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/install_k6.sh
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update -qq && sudo apt-get install k6 -y
 
       - name: Start application
-        run: bash $GITHUB_WORKSPACE/qa-platform/scripts/helpers/start_app.sh "${{ github.workspace }}/project" "${{ inputs.base-url }}"
+        run: |
+          BASE="${{ github.workspace }}/project"
+          if [ -f "$BASE/package.json" ]; then
+            cd "$BASE" && npm ci 2>/dev/null || npm install && npm start &
+          fi
+          if [ -f "$BASE/app.py" ]; then
+            pip install --break-system-packages               $([ -f "$BASE/requirements.txt" ] && echo "-r $BASE/requirements.txt" || echo "") || true
+            cd "$BASE" && python app.py &
+          fi
+          sleep 8
 
       - name: Run stress test
         run: |
@@ -514,7 +567,7 @@ jobs:
   report:
     name: "Generate Report"
     runs-on: ubuntu-latest
-    needs: [smoke, sanity, api-tests, regression, uat, load-test, stress-test]
+    needs: [smoke, sanity, api-tests, regression, uat, load-test]
     if: always()
 
     steps:

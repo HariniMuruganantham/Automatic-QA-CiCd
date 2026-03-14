@@ -19,21 +19,20 @@ if hasattr(sys.stderr, "reconfigure"):
 
 
 def set_output(name: str, value: str):
-    """Write a key=value line to GITHUB_OUTPUT (or stdout for local runs)."""
     output_file = os.environ.get("GITHUB_OUTPUT", "")
     line = f"{name}={value}\n"
     if output_file:
         with open(output_file, "a") as f:
             f.write(line)
-    print(f"  → {name}={value}")
+    print(f"  -> {name}={value}")
 
 
 SKIP_DIRS = {"node_modules", ".git", "venv", "__pycache__",
-             "dist", "build", ".next", ".nuxt", "coverage"}
+             "dist", "build", ".next", ".nuxt", "coverage",
+             "scripts", "qa-platform"}
 
 
 def count_source_files(workspace: str, extensions: list) -> int:
-    """Count source files with given extensions, skipping noise dirs."""
     p = Path(workspace)
     count = 0
     for ext in extensions:
@@ -44,40 +43,34 @@ def count_source_files(workspace: str, extensions: list) -> int:
 
 
 def detect_language(workspace: str) -> tuple:
-    """Return (language, framework) by inspecting root files + source file counts."""
     p = Path(workspace)
+    has_package_json  = (p / "package.json").exists()
+    has_requirements  = (p / "requirements.txt").exists()
+    has_pyproject     = (p / "pyproject.toml").exists()
+    has_python_marker = has_requirements or has_pyproject
 
-    has_package_json   = (p / "package.json").exists()
-    has_requirements   = (p / "requirements.txt").exists()
-    has_pyproject      = (p / "pyproject.toml").exists()
-    has_python_marker  = has_requirements or has_pyproject
-
-    # If BOTH package.json and Python markers exist, count source files to decide
     if has_package_json and has_python_marker:
         py_count = count_source_files(workspace, [".py"])
         js_count = count_source_files(workspace, [".js", ".ts", ".jsx", ".tsx"])
-        print(f"   ⚖️  Both package.json and Python markers found — "
-              f"py={py_count} js={js_count}")
+        print(f"   Both markers found -- py={py_count} js={js_count}")
         use_python = py_count > js_count
     else:
         use_python = has_python_marker and not has_package_json
 
-    # ── JavaScript / TypeScript ──────────────────────────────────
     if has_package_json and not use_python:
         try:
             pkg = json.loads((p / "package.json").read_text())
         except Exception:
             pkg = {}
         deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
-        if "next"     in deps: return "javascript", "nextjs"
-        if "express"  in deps: return "javascript", "express"
-        if "fastify"  in deps: return "javascript", "fastify"
-        if "react"    in deps: return "javascript", "react"
-        if "koa"      in deps: return "javascript", "koa"
-        if "hapi"     in deps: return "javascript", "hapi"
+        if "next"    in deps: return "javascript", "nextjs"
+        if "express" in deps: return "javascript", "express"
+        if "fastify" in deps: return "javascript", "fastify"
+        if "react"   in deps: return "javascript", "react"
+        if "koa"     in deps: return "javascript", "koa"
+        if "hapi"    in deps: return "javascript", "hapi"
         return "javascript", "node"
 
-    # ── Python ───────────────────────────────────────────────────
     if has_python_marker or use_python:
         req_path = p / "requirements.txt"
         reqs = req_path.read_text().lower() if req_path.exists() else ""
@@ -87,76 +80,82 @@ def detect_language(workspace: str) -> tuple:
         if "tornado" in reqs: return "python", "tornado"
         return "python", "python"
 
-    # ── Java ─────────────────────────────────────────────────────
-    if (p / "pom.xml").exists():         return "java", "maven"
-    if (p / "build.gradle").exists():    return "java", "gradle"
-
-    # ── Go ───────────────────────────────────────────────────────
-    if (p / "go.mod").exists():          return "go", "go"
-
-    # ── Ruby ─────────────────────────────────────────────────────
+    if (p / "pom.xml").exists():      return "java", "maven"
+    if (p / "build.gradle").exists(): return "java", "gradle"
+    if (p / "go.mod").exists():       return "go", "go"
     if (p / "Gemfile").exists():
         if (p / "config" / "routes.rb").exists() or "rails" in (p / "Gemfile").read_text().lower():
             return "ruby", "rails"
         return "ruby", "ruby"
 
-    # Default — last resort, count files to make best guess
     py_count = count_source_files(workspace, [".py"])
     js_count = count_source_files(workspace, [".js", ".ts", ".jsx", ".tsx"])
-    if py_count > js_count:
-        return "python", "python"
-    return "javascript", "node"
+    return ("python", "python") if py_count > js_count else ("javascript", "node")
+
+
+# --- detect_has_api -----------------------------------------------------------
+# Structural markers (directory/file layout) - these are definitive
+_API_DIR_MARKERS = [
+    "routes/", "controllers/", "endpoints/", "routers/",
+    "openapi.yaml", "openapi.json", "swagger.yaml", "swagger.json",
+    "app/api/", "pages/api/", "src/routes/", "src/api/",
+]
+
+# STRONG route-registration code patterns (not bare "/api/" string occurrences)
+_ROUTE_PATTERNS = [
+    "@app.route(", "@router.get(", "@router.post(", "@router.put(",
+    "@router.delete(", "@router.patch(", "app.add_url_rule(",
+    "router = APIRouter", "api_router = APIRouter",
+    "router.get(", "router.post(", "router.put(", "router.delete(",
+    "app.get(", "app.post(", "app.put(", "app.delete(",
+    "fastify.get(", "fastify.post(",
+]
+
+_ROUTE_FILE_EXTS = {".py", ".js", ".ts", ".go", ".java", ".rb"}
+_SCAN_SKIP = {"node_modules", ".git", "venv", "__pycache__", "dist", "build",
+              ".next", "coverage", "scripts", "qa-platform", "generated-tests",
+              "test", "tests", "__tests__"}
 
 
 def detect_has_api(workspace: str) -> bool:
-    """Return True if the project exposes an HTTP API."""
     p = Path(workspace)
-    indicators = [
-        "routes/", "api/", "controllers/", "endpoints/",
-        "openapi.yaml", "openapi.json", "swagger.yaml", "swagger.json",
-        "app/api/", "src/routes/", "src/api/", "routers/",
-    ]
-    if any((p / ind).exists() for ind in indicators):
-        return True
 
-    # Fallback heuristic: inspect source files for API route patterns.
-    api_markers = (
-        "/api/",
-        "/api\"",
-        "/api'",
-        "@app.route(",
-        "apirouter(",
-        "fastapi(",
-        "express(",
-        "router.get(",
-        "router.post(",
-    )
-    exts = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb")
+    # Tier 1: structural check (fast)
+    for marker in _API_DIR_MARKERS:
+        if (p / marker).exists():
+            print(f"   API dir/file found: {marker}")
+            return True
+
+    # Tier 2: scan for actual route-registration code
+    # Deliberately skips: test files, QA scripts, string-literal mentions
     for f in p.rglob("*"):
-        if f.suffix.lower() not in exts:
+        if f.suffix.lower() not in _ROUTE_FILE_EXTS:
             continue
-        if any(s in f.parts for s in SKIP_DIRS):
+        if any(s in f.parts for s in _SCAN_SKIP):
+            continue
+        stem = f.stem.lower()
+        if stem.startswith("test_") or stem.endswith("_test") or \
+           stem.endswith(".test") or stem.endswith(".spec"):
             continue
         try:
-            text = f.read_text(errors="ignore").lower()
+            text = f.read_text(errors="ignore")
         except Exception:
             continue
-        if any(marker in text for marker in api_markers):
-            return True
+        for pat in _ROUTE_PATTERNS:
+            if pat in text:
+                print(f"   API pattern '{pat}' in {f.relative_to(p)}")
+                return True
 
     return False
 
 
 def detect_has_auth(workspace: str) -> bool:
-    """Return True if the project has authentication (login/register/logout)."""
     p = Path(workspace)
-    auth_indicators = [
-        "login", "register", "logout", "auth", "signin", "signup",
-        "session", "jwt", "oauth", "passport",
-    ]
-    skip = {"node_modules", ".git", "venv", "__pycache__", "dist", "build"}
+    auth_indicators = ["login", "register", "logout", "auth", "signin", "signup",
+                       "session", "jwt", "oauth", "passport"]
+    skip = {"node_modules", ".git", "venv", "__pycache__", "dist", "build",
+            "scripts", "qa-platform", "generated-tests"}
 
-    # Check directory/file names
     for item in p.rglob("*"):
         if any(s in item.parts for s in skip):
             continue
@@ -164,7 +163,6 @@ def detect_has_auth(workspace: str) -> bool:
         if any(a in name for a in auth_indicators):
             return True
 
-    # Check package.json for auth deps
     pkg_path = p / "package.json"
     if pkg_path.exists():
         try:
@@ -176,37 +174,28 @@ def detect_has_auth(workspace: str) -> bool:
                 return True
         except Exception:
             pass
-
     return False
 
 
 def get_changed_files(workspace: str) -> list:
-    """Return list of files changed in the last commit."""
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
-            capture_output=True, text=True, check=True,
-            cwd=workspace
+            capture_output=True, text=True, check=True, cwd=workspace
         )
         files = [f for f in result.stdout.strip().split("\n") if f]
         if files:
             return files
     except Exception:
         pass
-
-    # Fallback: all tracked source files
     try:
-        result = subprocess.run(
-            ["git", "ls-files"], capture_output=True, text=True,
-            cwd=workspace
-        )
+        result = subprocess.run(["git", "ls-files"], capture_output=True, text=True, cwd=workspace)
         return result.stdout.strip().split("\n")[:30]
     except Exception:
         return []
 
 
 def read_code_sample(workspace: str, language: str) -> str:
-    """Read a representative code snippet from the project."""
     p = Path(workspace)
     ext_map = {
         "javascript": [".ts", ".tsx", ".js", ".jsx"],
@@ -216,7 +205,6 @@ def read_code_sample(workspace: str, language: str) -> str:
         "ruby":       [".rb"],
     }
     extensions = ext_map.get(language, [".py", ".js"])
-
     samples = []
     for ext in extensions:
         for f in sorted(p.rglob(f"*{ext}"))[:10]:
@@ -224,20 +212,19 @@ def read_code_sample(workspace: str, language: str) -> str:
                 continue
             try:
                 text = f.read_text(errors="ignore")
-                if len(text) > 50:   # skip near-empty files
+                if len(text) > 50:
                     rel = f.relative_to(p)
-                    samples.append(f"// ── {rel} ──\n{text[:700]}")
+                    samples.append(f"// -- {rel} --\n{text[:700]}")
             except Exception:
                 pass
         if len(samples) >= 4:
             break
-
     return "\n\n".join(samples[:4])
 
 
 def main():
     workspace = os.environ.get("WORKSPACE", os.getcwd())
-    print(f"🔍 Detecting stack in: {workspace}\n")
+    print(f"Detecting stack in: {workspace}\n")
 
     base_url             = os.environ.get("BASE_URL", "http://localhost:3000").rstrip("/")
     language, framework  = detect_language(workspace)
@@ -246,7 +233,7 @@ def main():
     changed_files        = get_changed_files(workspace)
     code_sample          = read_code_sample(workspace, language)
 
-    print("📦 Detected:")
+    print("Detected:")
     print(f"   Language:      {language}")
     print(f"   Framework:     {framework}")
     print(f"   Has API:       {has_api}")
@@ -255,7 +242,6 @@ def main():
     print(f"   Changed files: {len(changed_files)}")
     print()
 
-    # Persist for the AI generation step
     os.makedirs("generated-tests", exist_ok=True)
     detection = {
         "language":      language,
@@ -270,7 +256,6 @@ def main():
     with open("generated-tests/detection.json", "w") as f:
         json.dump(detection, f, indent=2)
 
-    # Write to GITHUB_ENV so next steps can also read these
     env_file = os.environ.get("GITHUB_ENV", "")
     if env_file:
         with open(env_file, "a") as f:
@@ -278,13 +263,12 @@ def main():
             f.write(f"DETECTED_FRAMEWORK={framework}\n")
             f.write(f"CODE_SAMPLE<<EOF\n{code_sample[:2000]}\nEOF\n")
 
-    # Write step outputs
     set_output("language",      language)
     set_output("framework",     framework)
     set_output("has-api",       str(has_api).lower())
     set_output("changed-files", ",".join(changed_files[:20]))
 
-    print("✅ Stack detection complete")
+    print("Stack detection complete")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-name: 🌙 Nightly Stress Tests
+name: "\U0001F319 Nightly Stress Tests"
 
 on:
   schedule:
@@ -12,8 +12,8 @@ jobs:
       project-name:  "Automatic-QA-CiCd"
       base-url:      "http://localhost:3000"
       openai-model:  "gpt-4o-mini"
-      run-load:      true
-      run-stress:    true      # ← stress only runs here, never on push
-      load-vus:      200       # heavier load at night
+      run-load:      false   # no app running in nightly self-test, skip load
+      run-stress:    false   # same reason
+      load-vus:      10
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
