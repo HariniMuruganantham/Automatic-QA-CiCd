@@ -9,8 +9,14 @@ Supports JS/TS (Jest, Playwright) and Python (pytest, playwright-python).
 import os
 import json
 import time
+import sys
 from pathlib import Path
 from openai import OpenAI, RateLimitError, APIStatusError
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # -- Configuration -------------------------------------------------------------
 
@@ -297,9 +303,12 @@ def call_openai(client: OpenAI, model: str,
 
 # -- Cost estimator -------------------------------------------------------------
 
+CHARS_PER_TOKEN = 3.5  # conservative estimate for mixed code + English
+
 def estimate_cost(model: str, prompt: str, output: str) -> float:
-    tokens_in  = len(prompt)  // 4
-    tokens_out = len(output)  // 4
+    """Approximate cost using ~3.5 chars/token heuristic (±20% for code-heavy text)."""
+    tokens_in  = int(len(prompt) / CHARS_PER_TOKEN)
+    tokens_out = int(len(output) / CHARS_PER_TOKEN)
     rates = {
         "gpt-4o-mini":  (0.00000015, 0.00000060),
         "gpt-4o":       (0.0000025,  0.0000100),
@@ -450,7 +459,7 @@ def main():
 
             cost = estimate_cost(model, prompt, content)
             total_cost += cost
-            tokens_out  = len(content) // 4
+            tokens_out  = int(len(content) / CHARS_PER_TOKEN)
             print(f"✅  {filepath.name}  (~{tokens_out} tokens, ~${cost:.5f})")
 
         except Exception as e:

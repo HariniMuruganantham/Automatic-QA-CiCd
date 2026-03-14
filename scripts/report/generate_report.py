@@ -9,9 +9,15 @@ and uses OpenAI to produce an intelligent failure analysis.
 import os
 import json
 import argparse
+import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from openai import OpenAI
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # ── Result parsers ─────────────────────────────────────────────────────────────
 
@@ -136,7 +142,7 @@ def load_all(results_dir: str) -> dict:
     out["smoke"]      = auto_parse(find("smoke-results/smoke-results.json",  "*smoke*.json"))
     out["sanity"]     = auto_parse(find("sanity-results/sanity-results.json", "*sanity*.json"))
     out["api"]        = auto_parse(find("api-results/api-results.json",       "*api-results*.json"))
-    out["regression"] = auto_parse(find("regression-results/regression-py-results.json",
+    out["regression"] = auto_parse(find("regression-results/regression-results.json",
                                         "*regression*.json"))
     out["uat"]        = auto_parse(find("uat-results/*.json", "*uat*.json"))
 
@@ -206,7 +212,7 @@ No bullet points, no markdown, no headers."""
 def build_html(results: dict, project: str, commit: str,
                branch: str, model: str, ai_text: str) -> str:
 
-    now       = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now       = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     short_sha = (commit or "unknown")[:7]
 
     non_perf     = {k: v for k, v in results.items() if v and "p95_ms" not in v}
@@ -509,7 +515,7 @@ def main():
     print("\n🖊️  Building HTML report...")
     html = build_html(results, args.project, args.commit,
                       args.branch, args.model, ai_text)
-    Path(args.output).write_text(html)
+    Path(args.output).write_text(html, encoding="utf-8")
     print(f"   Saved → {args.output}  ({len(html)//1024} KB)")
 
     # ── Machine-readable summary for PR comment ──
@@ -536,7 +542,9 @@ def main():
 
     out_dir = Path(args.results_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "report-summary.json").write_text(json.dumps(summary, indent=2))
+    (out_dir / "report-summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
 
     print(f"\n✅ Report complete — {total_passed} passed, {total_failed} failed")
 

@@ -9,7 +9,13 @@ Writes GitHub Actions step outputs and saves detection.json for the AI step.
 import os
 import json
 import subprocess
+import sys
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 def set_output(name: str, value: str):
@@ -89,7 +95,10 @@ def detect_language(workspace: str) -> tuple:
     if (p / "go.mod").exists():          return "go", "go"
 
     # ── Ruby ─────────────────────────────────────────────────────
-    if (p / "Gemfile").exists():         return "ruby", "rails"
+    if (p / "Gemfile").exists():
+        if (p / "config" / "routes.rb").exists() or "rails" in (p / "Gemfile").read_text().lower():
+            return "ruby", "rails"
+        return "ruby", "ruby"
 
     # Default — last resort, count files to make best guess
     py_count = count_source_files(workspace, [".py"])
@@ -107,7 +116,35 @@ def detect_has_api(workspace: str) -> bool:
         "openapi.yaml", "openapi.json", "swagger.yaml", "swagger.json",
         "app/api/", "src/routes/", "src/api/", "routers/",
     ]
-    return any((p / ind).exists() for ind in indicators)
+    if any((p / ind).exists() for ind in indicators):
+        return True
+
+    # Fallback heuristic: inspect source files for API route patterns.
+    api_markers = (
+        "/api/",
+        "/api\"",
+        "/api'",
+        "@app.route(",
+        "apirouter(",
+        "fastapi(",
+        "express(",
+        "router.get(",
+        "router.post(",
+    )
+    exts = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb")
+    for f in p.rglob("*"):
+        if f.suffix.lower() not in exts:
+            continue
+        if any(s in f.parts for s in SKIP_DIRS):
+            continue
+        try:
+            text = f.read_text(errors="ignore").lower()
+        except Exception:
+            continue
+        if any(marker in text for marker in api_markers):
+            return True
+
+    return False
 
 
 def detect_has_auth(workspace: str) -> bool:
@@ -143,12 +180,13 @@ def detect_has_auth(workspace: str) -> bool:
     return False
 
 
-def get_changed_files() -> list:
+def get_changed_files(workspace: str) -> list:
     """Return list of files changed in the last commit."""
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
-            capture_output=True, text=True, check=True
+            capture_output=True, text=True, check=True,
+            cwd=workspace
         )
         files = [f for f in result.stdout.strip().split("\n") if f]
         if files:
@@ -159,7 +197,8 @@ def get_changed_files() -> list:
     # Fallback: all tracked source files
     try:
         result = subprocess.run(
-            ["git", "ls-files"], capture_output=True, text=True
+            ["git", "ls-files"], capture_output=True, text=True,
+            cwd=workspace
         )
         return result.stdout.strip().split("\n")[:30]
     except Exception:
@@ -204,7 +243,7 @@ def main():
     language, framework  = detect_language(workspace)
     has_api              = detect_has_api(workspace)
     has_auth             = detect_has_auth(workspace)
-    changed_files        = get_changed_files()
+    changed_files        = get_changed_files(workspace)
     code_sample          = read_code_sample(workspace, language)
 
     print("📦 Detected:")
