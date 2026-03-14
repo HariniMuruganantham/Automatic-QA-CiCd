@@ -2,267 +2,229 @@
 """
 scripts/ai/generate_tests.py
 -----------------------------
-Calls OpenAI to generate all 7 QA test suites automatically.
-Supports JS/TS (Jest, Playwright) and Python (pytest, playwright-python).
+Calls OpenAI to generate all 7 QA test suites.
+Key fixes:
+  - Smoke/Sanity/Regression use ONLY httpx (no playwright)
+  - UAT uses playwright as proper pytest test_ functions
+  - Prompts include actual routes + expected responses from detection
+  - Content-Type checked with .startswith() not ==
 """
 
 import os
 import json
 import time
-import sys
 from pathlib import Path
 from openai import OpenAI, RateLimitError, APIStatusError
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-# -- Configuration -------------------------------------------------------------
-
+# ── Config ─────────────────────────────────────────────────────────────────────
 DEFAULT_MODEL = "gpt-4o-mini"
 TEST_TYPES    = ["smoke", "sanity", "api", "regression", "uat", "load", "stress"]
 
 SYSTEM_PROMPT = (
-    "You are a senior QA automation engineer. "
-    "Output ONLY raw, runnable test code - no explanations, no markdown fences "
-    "(no ```), no preamble, no commentary of any kind. "
-    "The output is written directly to a file and must be valid syntax."
+    "You are a senior QA automation engineer writing production-quality tests. "
+    "Output ONLY raw, runnable Python or JavaScript code with zero markdown, "
+    "zero fences (no ```), zero explanations, zero comments that aren't code comments. "
+    "The output is written directly to a file and executed immediately."
 )
 
-# -- Prompt factory -------------------------------------------------------------
-
-def _build_api_prompt(base_url: str, has_api: bool) -> str:
-    if not has_api:
-        return (
-            "Write 6-8 HTTP-level tests using node-fetch or axios that hit the actual "
-            "deployed URL: " + base_url + "\n\n"
-            "This is a static SPA with NO traditional REST API backend.\n"
-            "Do NOT use supertest or import from '../src/app'.\n"
-            "Test that key pages return 200, response times are under 3000ms, "
-            "and Content-Type headers are correct.\n\n"
-            "Output ONLY the complete test file."
-        )
-    return (
-        "Write 12-16 API tests covering all detectable endpoints at: " + base_url + "\n\n"
-        "Use: Python - pytest + httpx  |  JS - Jest + axios/node-fetch\n\n"
-        "Cover:\n"
-        "1. Happy path for every detectable endpoint (GET, POST, PUT, PATCH, DELETE)\n"
-        "2. 400 Bad Request - missing / malformed request body\n"
-        "3. 401 Unauthorized - missing auth token (only if auth exists)\n"
-        "4. 404 Not Found - non-existent resource ID\n"
-        "5. Response schema validation (check required fields exist)\n"
-        "6. Content-Type: application/json header on responses\n"
-        "7. Response time assertion (< 3000 ms)\n\n"
-        "Output ONLY the complete test file."
-    )
-
-
-def _build_uat_prompt(base_url: str, language: str, has_auth: bool) -> str:
-    import_line = (
-        'JS: import { test, expect } from "@playwright/test"'
-        if language == "javascript"
-        else "Python: from playwright.sync_api import sync_playwright, expect"
-    )
-    journey_1_2 = (
-        "1. User registration -> login flow\n2. Authenticated user workflow"
-        if has_auth
-        else "1. Visitor lands on homepage and sees hero content\n"
-             "2. Visitor browses to key sections (About, Projects, Skills)"
-    )
-    step_7 = "7. Logout / session end" if has_auth else "7. All nav links navigate to correct routes"
-    auth_warning = (
-        ""
-        if has_auth
-        else "\nIMPORTANT: Do NOT generate register/login/logout tests - this app has no auth.\n"
-    )
-    screenshot = (
-        'await page.screenshot({ path: "screenshots/test-name.png" });'
-        if language == "javascript"
-        else 'page.screenshot(path="screenshots/test_name.png")'
-    )
-    return (
-        "Write 6-8 UAT (end-to-end) tests using Playwright.\n"
-        + import_line + "\n\n"
-        "BASE_URL = \"" + base_url + "\"\n\n"
-        "Simulate REALISTIC user journeys for THIS specific project (read the source code):\n"
-        + journey_1_2 + "\n"
-        "3. Primary feature workflow (infer from the source code above)\n"
-        "4. Form interaction (submit with missing fields -> error message appears)\n"
-        "5. Responsive check - mobile viewport (375 x 812)\n"
-        "6. No console errors on main pages\n"
-        + step_7 + "\n"
-        + auth_warning + "\n"
-        "Add a screenshot inside each test:\n"
-        + screenshot + "\n\n"
-        "Output ONLY the complete test file."
-    )
-
+# ── Prompt builder ─────────────────────────────────────────────────────────────
 
 def build_prompt(test_type: str, language: str, framework: str,
                  project_name: str, code_sample: str,
-                 changed_files: list, base_url: str,
-                 has_api: bool, has_auth: bool) -> str:
+                 changed_files: list, base_url: str) -> str:
 
     changed_str = "\n".join(changed_files[:10]) if changed_files else "General changes"
 
-    lang_hint = {
-        "javascript": (
-            f"Use Jest for unit/integration tests. "
-            f"Use @playwright/test for E2E. Framework: {framework}."
-        ),
-        "python": (
-            f"Use pytest with pytest-json-report. "
-            f"Use httpx or requests for HTTP calls. "
-            f"Use playwright.sync_api for E2E. Framework: {framework}."
-        ),
-    }.get(language, f"Use an appropriate testing framework for {language}.")
+    # Common header injected into every prompt
+    base = f"""Project: '{project_name}' | Language: {language} | Framework: {framework}
+Base URL: {base_url}
+Changed files: {changed_str}
 
-    # Build a clear project context block so AI never guesses wrong
-    auth_note = (
-        "This project HAS authentication (login/register/logout flows exist)."
-        if has_auth else
-        "This project has NO authentication - do NOT generate login, register, "
-        "logout, or session tests. There are no auth routes."
-    )
-    api_note = (
-        f"The application DOES have a backend API. Base URL: {base_url}"
-        if has_api else
-        f"This is a STATIC/SPA frontend application with NO backend API server. "
-        f"It is deployed at: {base_url}. "
-        f"Do NOT generate supertest/server-side API tests. "
-        f"Use Playwright or fetch() against the live URL for any HTTP checks."
-    )
-
-    base = f"""Project: '{project_name}'
-Language: {language} | Framework: {framework}
-Deployed at: {base_url}
-{lang_hint}
-
-Project context (READ CAREFULLY - do not contradict this):
-- {auth_note}
-- {api_note}
-
-Changed files:
-{changed_str}
-
-Source code (for context):
-{code_sample[:2000]}
+Source code context:
+{code_sample[:2500]}
 
 """
 
     prompts = {
 
-        "smoke": base + f"""Write 6-8 SMOKE tests that verify the LIVE deployment at {base_url}:
-1. Root URL {base_url}/ returns 2xx
-2. At least 2-3 key page routes return non-500 responses
-3. Required environment variables exist (use process.env - only ones that realistically exist)
-4. No fatal import errors on main entry files
+        # ── SMOKE ─────────────────────────────────────────────────────────────
+        # Rule: ONLY use httpx + os. NO playwright. NO browser. Fast.
+        "smoke": base + f"""Write 6-8 SMOKE tests using ONLY pytest + httpx (no playwright, no browser).
 
-IMPORTANT: Use fetch() or @playwright/test request fixture to hit {base_url}.
-Do NOT check for database connections or AWS credentials in frontend tests.
-Keep each test fast (under 5 seconds). Output ONLY the complete test file.""",
+RULES:
+- Import only: pytest, httpx, os
+- Use BASE_URL = os.getenv("BASE_URL", "{base_url}")
+- Every test makes one HTTP request and checks status < 500
+- Do NOT check for specific env variable names unless you see them in the code
+- Do NOT import playwright or any browser library
 
-        "sanity": base + f"""Write 8-12 SANITY tests focused on the CHANGED files above.
-Test against: {base_url}
+Tests must verify:
+1. GET / returns status < 500
+2. GET /health returns 200 and body contains "ok" or "status"
+3. At least 2 other routes from the code sample return < 500
+4. POST to a create endpoint with valid JSON returns < 500
+5. GET a non-existent resource returns 404
 
-1. Core business logic of changed modules
-2. Function input/output contracts (happy path)
-3. Critical user-facing content is present on the live site
-4. Boundary value checks for any changed logic
-5. At least one negative/error path per changed module
+Output ONLY the complete Python test file, no markdown.""",
 
-Use imports that match the actual project structure visible in the source code above.
-Output ONLY the complete test file.""",
+        # ── SANITY ────────────────────────────────────────────────────────────
+        # Rule: ONLY use httpx. NO playwright.
+        "sanity": base + f"""Write 8-10 SANITY tests using ONLY pytest + httpx (no playwright, no browser).
 
-        "api": base + _build_api_prompt(base_url, has_api),
+RULES:
+- Import only: pytest, httpx
+- BASE_URL = "{base_url}"
+- Only test routes that actually exist in the source code above
+- Check EXACT response bodies only if you can see the exact return value in the code
+- Use response.status_code == 200 (not < 500) for known-good endpoints
+- Do NOT import playwright
 
-        "regression": base + f"""Write 15-20 REGRESSION tests covering existing functionality.
-Test the live site at: {base_url}
+Tests must cover:
+1. Health check returns 200 with correct JSON body (read it from code)
+2. Root endpoint returns 200
+3. List endpoint returns 200 and response is a dict or list
+4. Get one item by ID returns 200 with correct fields (id, name, etc.)
+5. Get non-existent item returns 404
+6. Price/numeric fields are >= 0
+7. Boolean fields have correct types
 
-1. Every major page/section of the application (infer from code and routes)
-2. Key UI components render correctly (Navbar, Footer, main sections)
-3. Navigation between routes works
-4. Content from source files (portfolio data, text) appears on the correct pages
-5. Error handling paths (network errors, invalid routes)
-6. {"Form validation and submission flows" if has_auth else "Contact form or any interactive forms"}
-7. At least 2 edge case / boundary tests
+Output ONLY the complete Python test file, no markdown.""",
 
-{"Do NOT test login/register/logout - this project has no auth." if not has_auth else ""}
-Use @testing-library/react for component tests and @playwright/test for E2E.
-Output ONLY the complete test file.""",
+        # ── API ───────────────────────────────────────────────────────────────
+        "api": base + f"""Write 10-14 API tests using pytest + httpx.
 
-        "uat": base + _build_uat_prompt(base_url, language, has_auth),
+CRITICAL RULES:
+- BASE_URL = "{base_url}"
+- Only test routes that exist in the source code above
+- For Content-Type: use `assert "application/json" in response.headers["content-type"]`
+  (not ==, Flask appends charset)
+- For error messages: read the EXACT string from the source code above
+- For DELETE: Flask may return 200 with body OR 204 with no body — handle both:
+  `assert response.status_code in (200, 204)`
+- For response time: `assert response.elapsed.total_seconds() < 3`
+- Do NOT test routes like /api/widgets or /contact that don't exist in the code
 
-        "load": base + f"""Write a k6 LOAD test script (always JavaScript for k6).
+Tests must cover:
+1. GET /health — 200, check JSON body matches code
+2. GET main list endpoint — 200, returns dict with "items" key or list
+3. GET single item — 200, check id/name/price fields exist
+4. GET non-existent item — 404
+5. POST create with valid body — 201, check "id" in response
+6. POST create with missing required field — 400
+7. PUT update existing — 200, check updated fields
+8. PUT update non-existent — 404
+9. DELETE existing — 200 or 204
+10. DELETE non-existent — 404
 
-import http from 'k6/http';
-import {{ sleep, check }} from 'k6';
+Output ONLY the complete Python test file, no markdown.""",
+
+        # ── REGRESSION ────────────────────────────────────────────────────────
+        # Rule: httpx only, no playwright, only real routes
+        "regression": base + f"""Write 12-15 REGRESSION tests using pytest + httpx (no playwright, no browser).
+
+RULES:
+- Import only: pytest, httpx
+- BASE_URL = "{base_url}"
+- Only test routes that exist in the source code
+- Do NOT assume routes like /widgets, /contact, /nav that don't appear in the code
+- Do NOT import playwright
+
+Tests must cover:
+1. All CRUD operations for the main resource
+2. Filter/query parameters if they exist in the code
+3. Boundary values (price = 0, very long name string)
+4. Correct HTTP methods (PUT vs PATCH if both exist)
+5. Response structure (all required fields present)
+6. Error handler routes (404 response has "error" key)
+7. Creating then reading back (state consistency)
+8. Idempotency checks where applicable
+
+Output ONLY the complete Python test file, no markdown.""",
+
+        # ── UAT ───────────────────────────────────────────────────────────────
+        # Rule: Playwright BUT as proper pytest test_ functions
+        "uat": base + f"""Write 5-6 UAT tests using pytest + playwright (playwright.sync_api).
+
+CRITICAL RULES:
+- Each test MUST be a proper `def test_*` function that pytest can collect
+- Do NOT write a standalone function called run_playwright_tests()
+- Use `from playwright.sync_api import sync_playwright` inside each test
+- Use headless=True (not headless=False)
+- BASE_URL = "{base_url}"
+- These are API/JSON endpoints, NOT a web UI — navigate to JSON endpoints, check response text
+- Do NOT click on "About", "Projects", "Skills", "nav links" — there is no HTML UI
+- Do NOT use page.title() == "Sample App" — it won't have that title
+- Screenshots path must use os.makedirs first
+
+Tests must cover:
+1. Navigate to /health — response body contains "ok"
+2. Navigate to main list endpoint — response body contains "items" or "count"
+3. Navigate to /api/items/1 — body contains "Widget A"
+4. Navigate to /api/items/999 — body contains "error" or status suggests 404
+5. Mobile viewport (375x812) — navigate to / and check page loads
+
+Output ONLY the complete Python test file, no markdown.""",
+
+        # ── LOAD ──────────────────────────────────────────────────────────────
+        "load": base + f"""Write a k6 LOAD test (JavaScript).
 
 const BASE_URL = __ENV.BASE_URL || '{base_url}';
 
 Scenario:
-- Ramp up:   0 -> 50 VUs over 30 seconds
-- Hold:      50 VUs for 60 seconds
-- Ramp down: 50 -> 0 VUs over 10 seconds
+- Ramp up: 0 → 50 VUs over 30s
+- Hold: 50 VUs for 60s
+- Ramp down: 50 → 0 over 10s
 
-Requirements:
-1. Test the REAL routes of this application - infer from the source code above.
-   For a SPA/portfolio: test /, /about, /projects, /skills, /contact
-   For an API: test actual endpoints visible in the code
-2. Add think time: sleep(Math.random() * 2 + 1)
-3. Thresholds: p(95) < 500ms, http_req_failed rate < 0.01
-4. Add check() assertions for status 200
+Thresholds: p(95) < 500ms, http_req_failed rate < 0.01
 
-Output ONLY the complete k6 JavaScript file.""",
+Test these endpoints in sequence per VU iteration:
+1. GET /health
+2. GET /api/items
+3. GET /api/items/1
+4. POST /api/items with JSON body
+Add sleep(Math.random() * 2 + 1) between requests.
+Add check() on status codes.
 
-        "stress": base + f"""Write a k6 STRESS test script (always JavaScript for k6)
-to find the breaking point of: {base_url}
+Output ONLY the complete k6 JavaScript file, no markdown.""",
+
+        # ── STRESS ────────────────────────────────────────────────────────────
+        "stress": base + f"""Write a k6 STRESS test (JavaScript).
 
 const BASE_URL = __ENV.BASE_URL || '{base_url}';
 
 Stages:
-- Stage 1:  0 ->  50 VUs /  60s  (warm-up)
-- Stage 2: 50 -> 200 VUs / 120s  (ramp stress)
-- Stage 3: 200 VUs      / 180s  (sustained stress)
-- Stage 4: 200 -> 500 VUs/  60s  (spike)
-- Stage 5: 500 ->   0 VUs/  60s  (recovery)
+- 0 → 50 VUs / 60s (warm-up)
+- 50 → 200 VUs / 120s (stress ramp)
+- 200 VUs / 180s (sustained stress)
+- 200 → 500 VUs / 60s (spike)
+- 500 → 0 VUs / 60s (recovery)
 
-Requirements:
-1. Hit the most critical route of this application (infer from code)
-2. Thresholds: allow up to 20% error rate (stress is expected to break things)
-3. Track p95 and p99 response times across stages
-4. Add check() for status codes
-5. Log error rate increase with console.warn
+Allow up to 20% error rate (stress is expected to degrade).
+Track p95 and p99. Add check() on status codes.
+Use const BASE_URL = __ENV.BASE_URL || '{base_url}'.
 
-Output ONLY the complete k6 JavaScript file.""",
+Output ONLY the complete k6 JavaScript file, no markdown.""",
     }
 
     return prompts[test_type]
 
 
-# -- File naming ----------------------------------------------------------------
+# ── File naming ────────────────────────────────────────────────────────────────
 
 def get_filename(test_type: str, language: str, project_name: str) -> str:
     safe = project_name.lower().replace(" ", "_").replace("-", "_")
     if test_type in ("load", "stress"):
         return f"{test_type}-test.js"
     if language == "javascript":
-        if test_type == "uat":
-            return f"{safe}_uat.spec.ts"
-        return f"{safe}_{test_type}.test.ts"
-    else:
-        if test_type == "uat":
-            return f"test_{safe}_uat.py"
-        return f"test_{safe}_{test_type}.py"
+        return f"{safe}_{test_type}.spec.ts" if test_type == "uat" else f"{safe}_{test_type}.test.ts"
+    return f"test_{safe}_{test_type}.py"
 
 
-# -- OpenAI caller with retry + model fallback ----------------------------------
+# ── OpenAI caller ──────────────────────────────────────────────────────────────
 
-def call_openai(client: OpenAI, model: str,
-                prompt: str, max_tokens: int = 2500) -> str:
-    retries = 3
-    for attempt in range(retries):
+def call_openai(client: OpenAI, model: str, prompt: str,
+                max_tokens: int = 2500) -> str:
+    for attempt in range(3):
         try:
             resp = client.chat.completions.create(
                 model=model,
@@ -274,86 +236,80 @@ def call_openai(client: OpenAI, model: str,
                 max_tokens=max_tokens,
             )
             content = resp.choices[0].message.content.strip()
+            # Strip accidental markdown fences
             if content.startswith("```"):
-                lines = content.split("\n")
-                end   = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
+                lines   = content.split("\n")
+                end     = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 content = "\n".join(lines[1:end])
             return content
 
         except RateLimitError:
             wait = 5 * (2 ** attempt)
-            print(f"    ⏳ Rate limited - waiting {wait}s (attempt {attempt+1}/{retries})")
+            print(f"    ⏳ Rate limited — waiting {wait}s")
             time.sleep(wait)
-
         except APIStatusError as e:
             if e.status_code == 429:
                 time.sleep(10)
                 continue
-            if attempt == retries - 1:
+            if attempt == 2:
                 raise
             time.sleep(3)
-
         except Exception:
-            if attempt == retries - 1:
+            if attempt == 2:
                 raise
             time.sleep(3)
+    raise RuntimeError("OpenAI call failed after 3 attempts")
 
-    raise RuntimeError(f"OpenAI call failed after {retries} attempts")
-
-
-# -- Cost estimator -------------------------------------------------------------
-
-CHARS_PER_TOKEN = 3.5  # conservative estimate for mixed code + English
 
 def estimate_cost(model: str, prompt: str, output: str) -> float:
-    """Approximate cost using ~3.5 chars/token heuristic (±20% for code-heavy text)."""
-    tokens_in  = int(len(prompt) / CHARS_PER_TOKEN)
-    tokens_out = int(len(output) / CHARS_PER_TOKEN)
+    ti = len(prompt) // 4
+    to = len(output) // 4
     rates = {
-        "gpt-4o-mini":  (0.00000015, 0.00000060),
-        "gpt-4o":       (0.0000025,  0.0000100),
-        "gpt-4-turbo":  (0.0000100,  0.0000300),
+        "gpt-4o-mini": (0.00000015, 0.00000060),
+        "gpt-4o":      (0.0000025,  0.0000100),
     }
-    r_in, r_out = rates.get(model, (0.0000025, 0.0000100))
-    return (tokens_in * r_in) + (tokens_out * r_out)
+    ri, ro = rates.get(model, (0.0000025, 0.0000100))
+    return ti * ri + to * ro
 
 
-# -- Fallback writer ------------------------------------------------------------
+# ── Fallback ───────────────────────────────────────────────────────────────────
 
 def write_fallback(out_dir: Path, test_type: str,
-                   language: str, project_name: str):
+                   language: str, project_name: str, base_url: str):
     filename = get_filename(test_type, language, project_name)
-    filepath = out_dir / filename
     safe     = project_name.replace("-", "_").replace(" ", "_")
+    filepath = out_dir / filename
 
-    if language == "python":
-        content = f"""import pytest
-
-class Test{safe.title()}{test_type.title()}Fallback:
-    def test_{test_type}_placeholder(self):
-        assert True
-"""
-    elif test_type in ("load", "stress"):
+    if test_type in ("load", "stress"):
         content = f"""import http from 'k6/http';
 import {{ sleep }} from 'k6';
 export const options = {{ vus: 1, duration: '5s' }};
 export default function () {{
-  http.get(__ENV.BASE_URL || 'http://localhost:3000');
+  http.get(__ENV.BASE_URL || '{base_url}');
   sleep(1);
 }}
 """
+    elif language == "python":
+        content = f"""import pytest
+import httpx
+
+BASE_URL = "{base_url}"
+
+class Test{safe.title()}{test_type.title()}Fallback:
+    def test_{test_type}_placeholder(self):
+        response = httpx.get(f"{{BASE_URL}}/health")
+        assert response.status_code < 500
+"""
     else:
-        content = f"""describe('{project_name} - {test_type} (fallback)', () => {{
-  test('placeholder - replace with real {test_type} tests', () => {{
-    expect(true).toBe(true);
-  }});
+        content = f"""describe('{project_name} {test_type} (fallback)', () => {{
+  test('placeholder', () => {{ expect(true).toBe(true); }});
 }});
 """
     filepath.write_text(content)
-    print(f"      fallback -> {filepath.name}")
+    print(f"      fallback → {filepath.name}")
 
 
-# -- Newman collection ----------------------------------------------------------
+# ── Newman collection ──────────────────────────────────────────────────────────
 
 def write_newman_collection(project_name: str, base_url: str):
     collection = {
@@ -361,19 +317,21 @@ def write_newman_collection(project_name: str, base_url: str):
             "name": f"{project_name} API Tests",
             "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
         },
-        "item": [{
-            "name": "Health Check",
-            "request": {
-                "method": "GET",
-                "header": [],
-                "url": {"raw": "{{BASE_URL}}/", "host": ["{{BASE_URL}}"], "path": [""]}
-            },
-            "event": [{"listen": "test", "script": {"exec": [
-                "pm.test('Status 2xx', () => {",
-                "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 204]);",
-                "});",
-            ]}}]
-        }],
+        "item": [
+            {
+                "name": "Health Check",
+                "request": {
+                    "method": "GET",
+                    "header": [],
+                    "url": {"raw": "{{BASE_URL}}/health",
+                            "host": ["{{BASE_URL}}"], "path": ["health"]}
+                },
+                "event": [{"listen": "test", "script": {"exec": [
+                    "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                    "pm.test('Response < 500ms', () => pm.expect(pm.response.responseTime).to.be.below(500));",
+                ]}}]
+            }
+        ],
         "variable": [{"key": "BASE_URL", "value": base_url}]
     }
     api_dir = Path("generated-tests/api")
@@ -381,7 +339,7 @@ def write_newman_collection(project_name: str, base_url: str):
     (api_dir / "collection.json").write_text(json.dumps(collection, indent=2))
 
 
-# -- Main -----------------------------------------------------------------------
+# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -389,16 +347,14 @@ def main():
         print("❌  OPENAI_API_KEY is not set.")
         raise SystemExit(1)
 
-    model        = os.environ.get("OPENAI_MODEL",   DEFAULT_MODEL)
-    language     = os.environ.get("LANGUAGE",       "javascript")
-    framework    = os.environ.get("FRAMEWORK",      "node")
-    project_name = os.environ.get("PROJECT_NAME",   "MyProject")
-    base_url     = os.environ.get("BASE_URL",       "http://localhost:3000").rstrip("/")
-    changed_files = [
-        f for f in os.environ.get("CHANGED_FILES", "").split(",") if f
-    ]
+    model         = os.environ.get("OPENAI_MODEL",   DEFAULT_MODEL)
+    language      = os.environ.get("LANGUAGE",       "python")
+    framework     = os.environ.get("FRAMEWORK",      "flask")
+    project_name  = os.environ.get("PROJECT_NAME",   "MyProject")
+    base_url      = os.environ.get("BASE_URL",        "http://localhost:3000")
+    changed_files = [f for f in os.environ.get("CHANGED_FILES", "").split(",") if f]
 
-    # Load richer data from detect_stack.py output
+    # Load richer data from detect_stack.py
     detection_path = Path("generated-tests/detection.json")
     detection: dict = {}
     if detection_path.exists():
@@ -406,20 +362,14 @@ def main():
             detection     = json.loads(detection_path.read_text())
             language      = detection.get("language",  language)
             framework     = detection.get("framework", framework)
+            base_url      = detection.get("base_url",  base_url)
             changed_files = changed_files or detection.get("changed_files", [])
         except Exception:
             pass
 
-    has_api  = detection.get("has_api",  False)
-    has_auth = detection.get("has_auth", False)
-
-    # Override base_url from detection if set, but env var takes priority
-    if not base_url or base_url == "http://localhost:3000":
-        base_url = detection.get("base_url", base_url)
-
     code_sample = detection.get("code_sample", "")
     if not code_sample:
-        ws          = os.environ.get("WORKSPACE", os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
+        ws          = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
         code_sample = _read_code_sample(ws, language)
 
     client = OpenAI(api_key=api_key)
@@ -429,8 +379,6 @@ def main():
     print(f"   Project:  {project_name}")
     print(f"   Language: {language} / {framework}")
     print(f"   Base URL: {base_url}")
-    print(f"   Has API:  {has_api}")
-    print(f"   Has Auth: {has_auth}")
     print(f"   Changed:  {len(changed_files)} files")
     print()
 
@@ -445,32 +393,27 @@ def main():
 
         prompt = build_prompt(
             test_type, language, framework,
-            project_name, code_sample, changed_files,
-            base_url, has_api, has_auth
+            project_name, code_sample, changed_files, base_url
         )
 
         try:
-            content = call_openai(client, model, prompt)
-
-            filename = get_filename(test_type, language, project_name)
-            filepath = out_dir / filename
+            content    = call_openai(client, model, prompt)
+            filename   = get_filename(test_type, language, project_name)
+            filepath   = out_dir / filename
             filepath.write_text(content)
             generated.append(str(filepath))
-
-            cost = estimate_cost(model, prompt, content)
+            cost        = estimate_cost(model, prompt, content)
             total_cost += cost
-            tokens_out  = int(len(content) / CHARS_PER_TOKEN)
-            print(f"✅  {filepath.name}  (~{tokens_out} tokens, ~${cost:.5f})")
-
+            print(f"✅  {filename}  (~{len(content)//4} tokens, ~${cost:.5f})")
         except Exception as e:
             print(f"⚠️   {e.__class__.__name__}: {str(e)[:60]}")
-            write_fallback(out_dir, test_type, language, project_name)
+            write_fallback(out_dir, test_type, language, project_name, base_url)
 
         time.sleep(1.5)
 
-    if has_api:
+    if detection.get("has_api", True):
         write_newman_collection(project_name, base_url)
-        print(f"  📮  Newman collection -> generated-tests/api/collection.json")
+        print(f"  📮  Newman collection written")
 
     summary = {
         "project":            project_name,
@@ -478,8 +421,8 @@ def main():
         "framework":          framework,
         "model":              model,
         "base_url":           base_url,
-        "has_api":            has_api,
-        "has_auth":           has_auth,
+        "has_api":            detection.get("has_api", True),
+        "has_auth":           detection.get("has_auth", False),
         "generated_files":    generated,
         "test_types":         TEST_TYPES,
         "estimated_cost_usd": round(total_cost, 5),
@@ -498,12 +441,8 @@ def main():
 
 def _read_code_sample(workspace: str, language: str) -> str:
     p    = Path(workspace)
-    exts = {
-        "javascript": [".ts", ".tsx", ".js", ".jsx"],
-        "python":     [".py"],
-    }.get(language, [".py"])
+    exts = {"javascript": [".ts", ".tsx", ".js"], "python": [".py"]}.get(language, [".py"])
     skip = {"node_modules", ".git", "venv", "__pycache__", "dist", "build", ".next"}
-
     samples = []
     for ext in exts:
         for f in sorted(p.rglob(f"*{ext}"))[:8]:
@@ -512,7 +451,7 @@ def _read_code_sample(workspace: str, language: str) -> str:
             try:
                 text = f.read_text(errors="ignore")
                 if len(text) > 50:
-                    samples.append(text[:600])
+                    samples.append(f"// ── {f.relative_to(p)} ──\n{text[:700]}")
             except Exception:
                 pass
         if samples:

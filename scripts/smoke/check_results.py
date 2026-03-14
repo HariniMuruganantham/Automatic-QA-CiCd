@@ -2,91 +2,95 @@
 """
 scripts/smoke/check_results.py
 -------------------------------
-Pipeline gate: exits with code 1 if any smoke test FAILED.
-A missing results file is treated as a warning (pass) — it means
-no tests ran (e.g. no test runner found), not that tests failed.
-Supports both Jest (JSON) and pytest-json-report formats.
+Pipeline gate: exits 1 if smoke tests failed OR had collection errors.
+Handles Jest and pytest-json-report formats.
 """
+
 import sys
 import json
 from pathlib import Path
-
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 def load_and_check(results_file: str):
     path = Path(results_file)
 
-    # ── File not found ──────────────────────────────────────────
     if not path.exists():
-        print(f"⚠️  Smoke results file not found: {results_file}")
-        print("   No tests were executed (test runner may not have found any files).")
-        print("   Treating as PASS — nothing failed.")
-        sys.exit(0)   # ← was sys.exit(1), changed to 0
+        print(f"⚠️  Results file not found: {results_file}")
+        print("   Treating as FAIL — cannot proceed without smoke results.")
+        sys.exit(1)
 
-    # ── Parse ───────────────────────────────────────────────────
     try:
         data = json.loads(path.read_text())
     except json.JSONDecodeError as e:
-        print(f"⚠️  Cannot parse results file ({e}) — treating as PASS.")
-        sys.exit(0)   # ← was sys.exit(1), changed to 0
+        print(f"❌  Cannot parse results file: {e}")
+        sys.exit(1)
 
-    # ── Detect format ───────────────────────────────────────────
+    # ── Jest format ────────────────────────────────────────────
     if "numFailedTests" in data:
-        # Jest format
-        failed  = data.get("numFailedTests",  0)
-        passed  = data.get("numPassedTests",  0)
-        total   = data.get("numTotalTests",   0)
-        fmt     = "Jest"
-        failure_details = []
+        failed = data.get("numFailedTests",  0)
+        passed = data.get("numPassedTests",  0)
+        total  = data.get("numTotalTests",   0)
+        fmt    = "Jest"
+        failures = []
         for suite in data.get("testResults", []):
             for t in suite.get("testResults", []):
                 if t.get("status") == "failed":
-                    name = t.get("fullName", "unknown test")
-                    msgs = t.get("failureMessages") or ["(no message)"]
-                    failure_details.append((name, msgs[0][:250]))
+                    msg = (t.get("failureMessages") or ["(no message)"])[0]
+                    failures.append((t.get("fullName", "unknown"), msg[:250]))
 
+    # ── pytest-json-report format ──────────────────────────────
     elif "summary" in data:
-        # pytest-json-report format
-        s       = data.get("summary", {})
-        failed  = s.get("failed",  0)
-        passed  = s.get("passed",  0)
-        total   = s.get("total",   0)
-        fmt     = "pytest"
-        failure_details = []
+        s      = data.get("summary", {})
+        failed = s.get("failed",  0)
+        passed = s.get("passed",  0)
+        total  = s.get("total",   0)
+        fmt    = "pytest"
+        failures = []
+
+        # Check collector errors (import errors, syntax errors)
+        collector_errors = []
+        for c in data.get("collectors", []):
+            if c.get("outcome") == "failed":
+                repr_ = str(c.get("longrepr", ""))
+                collector_errors.append((c.get("nodeid", "unknown"), repr_[:300]))
+
+        if collector_errors:
+            print(f"\n❌  SMOKE GATE BLOCKED — collection errors (import/syntax)")
+            print("   Tests could not even be imported. Fix these errors first:\n")
+            for nodeid, repr_ in collector_errors:
+                print(f"   ✗ {nodeid}")
+                # Show the actual error line
+                for line in repr_.splitlines():
+                    if "Error" in line or "error" in line:
+                        print(f"     {line.strip()}")
+                        break
+                print()
+            print("   Common fixes:")
+            print("   • 'No module named playwright' → add playwright install step")
+            print("   • 'No module named httpx'      → add httpx to pip install step")
+            print("   • 'ModuleNotFoundError'         → check imports in generated tests")
+            sys.exit(1)
+
         for t in data.get("tests", []):
             if t.get("outcome") == "failed":
-                name = t.get("nodeid", "unknown test")
-                msg  = (t.get("call") or {}).get("longrepr", "(no message)")
-                failure_details.append((name, str(msg)[:250]))
+                msg = str((t.get("call") or {}).get("longrepr", "(no message)"))
+                failures.append((t.get("nodeid", "unknown"), msg[:250]))
 
     else:
-        print("⚠️  Unknown results format — assuming PASS (manual check recommended).")
+        print("⚠️  Unknown results format — assuming PASS")
         sys.exit(0)
 
-    # ── Report ──────────────────────────────────────────────────
     print(f"💨 Smoke Tests ({fmt}): {passed}/{total} passed, {failed} failed")
 
-    if total == 0:
-        print("⚠️  No tests were collected — skipping gate check.")
-        sys.exit(0)
-
     if failed > 0:
-        print(f"\n❌  SMOKE GATE BLOCKED — {failed} test(s) failed")
-        print("   Pipeline will NOT continue until all smoke tests pass.\n")
-        for name, msg in failure_details[:5]:
+        print(f"\n❌  SMOKE GATE BLOCKED — {failed} test(s) failed\n")
+        for name, msg in failures[:5]:
             print(f"   ✗ {name}")
-            first_line = next(
-                (ln.strip() for ln in msg.splitlines() if ln.strip()),
-                "(no details)"
-            )
-            print(f"     {first_line}\n")
+            first = next((l.strip() for l in msg.splitlines() if l.strip()), "(no details)")
+            print(f"     {first}\n")
         sys.exit(1)
 
-    print("✅  Smoke gate passed — continuing pipeline\n")
+    print("✅  Smoke gate passed — pipeline continues\n")
     sys.exit(0)
 
 
